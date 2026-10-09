@@ -35,6 +35,8 @@ interface DepthPt {
 const KEEP_TRADES_MS = 60 * 60_000; // sparkline needs an hour
 const KEEP_DEPTH_MS = 15 * 60_000;
 const DEPTH_SAMPLE_MS = 1000; // keep at most one depth sample per second
+/** Finest bar kept: 15 s, so the 1-minute scalping window can see a move inside a minute. */
+export const BASE_BAR_MS = 15_000;
 
 export class MarketStats {
   private trades: TradePt[] = [];
@@ -42,13 +44,14 @@ export class MarketStats {
   private updates: number[] = [];
   private lastDepthAt = -Infinity;
   ladder = 0;
-  /** 1-minute bars of the price path (book mid + trades), minute start → bar. Kept 75 minutes. */
+  /** 15-second bars of the price path (book mid + trades), bar start → bar. Kept 75 minutes.
+   * Read back at 15 s (scalping window) or merged into 1-minute bars. */
   private barMap = new Map<number, Bar>();
 
   /** Fold a price into its minute's bar. */
   private mark(t: number, price: number): void {
     if (!(price > 0)) return;
-    const m = Math.floor(t / 60_000) * 60_000;
+    const m = Math.floor(t / BASE_BAR_MS) * BASE_BAR_MS;
     const b = this.barMap.get(m);
     if (!b) this.barMap.set(m, { t: m, o: price, h: price, l: price, c: price });
     else {
@@ -59,20 +62,28 @@ export class MarketStats {
   }
 
   /**
-   * Complete 1-minute bars up to (not including) the current minute, oldest first. Minutes with no
-   * price are filled flat at the previous close: no movement is information too.
+   * Complete bars of `barMs` (a multiple of 15 s; default 1 minute) up to, not including, the
+   * current bar, oldest first, at most `max` of them. Bars with no price are filled flat at the
+   * previous close: no movement is information too.
    */
-  bars(now: number, max = 75): Bar[] {
-    const cur = Math.floor(now / 60_000) * 60_000;
+  bars(now: number, max = 75, barMs = 60_000): Bar[] {
+    const step = Math.max(BASE_BAR_MS, Math.round(barMs / BASE_BAR_MS) * BASE_BAR_MS);
+    const cur = Math.floor(now / step) * step;
     const keys = [...this.barMap.keys()].filter((k) => k < cur).sort((a, b) => a - b);
     if (!keys.length) return [];
     const out: Bar[] = [];
     let prev: Bar | undefined;
-    for (let m = Math.max(keys[0]!, cur - max * 60_000); m < cur; m += 60_000) {
-      const b = this.barMap.get(m);
-      if (b) {
-        out.push({ ...b });
-        prev = b;
+    const first = Math.max(Math.floor(keys[0]! / step) * step, cur - max * step);
+    for (let m = first; m < cur; m += step) {
+      let agg: Bar | undefined;
+      for (let k = m; k < m + step; k += BASE_BAR_MS) {
+        const b = this.barMap.get(k);
+        if (!b) continue;
+        agg = agg ? { t: m, o: agg.o, h: Math.max(agg.h, b.h), l: Math.min(agg.l, b.l), c: b.c } : { t: m, o: b.o, h: b.h, l: b.l, c: b.c };
+      }
+      if (agg) {
+        out.push(agg);
+        prev = agg;
       } else if (prev) out.push({ t: m, o: prev.c, h: prev.c, l: prev.c, c: prev.c });
     }
     return out;

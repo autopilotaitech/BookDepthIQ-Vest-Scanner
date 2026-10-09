@@ -10,7 +10,7 @@ import { MarketStats } from '../src/scan/metrics';
 import { categoryOf, sessionAt, type Category, type SessionNow } from '../src/scan/score';
 import { BASELINE_MIN_MINUTES, addHistory, addMinute, avgPerMin, hourIn, type HourMap } from '../src/scan/history';
 import { liquidityScore } from '../src/scan/score';
-import { regime, type Regime } from '../src/scan/regime';
+import { TIMEFRAMES, regime, type Regime } from '../src/scan/regime';
 
 export interface Market {
   info: SymbolInfo;
@@ -242,9 +242,14 @@ export class Engine {
   /** Regime for a market right now: liquidity score, volatility, trend vs chop, relative volume. */
   regimeOf(m: Market, now: number, windowMs: number): { score: number | undefined; regime: Regime } {
     const s = m.stats.summary(now, windowMs);
-    const score = m.session.open ? liquidityScore(s) : undefined;
+    // "Can I get filled here?" needs a steadier read than one minute: Vest's tape is thin (ES can
+    // print ~2 trades/min), so a 1-minute window would call good markets dead between prints.
+    // Liquidity always uses at least 5 minutes; the window drives the regime timing and $/min.
+    const liqSummary = windowMs >= 5 * 60_000 ? s : m.stats.summary(now, 5 * 60_000);
+    const score = m.session.open ? liquidityScore(liqSummary) : undefined;
     const usual = avgPerMin(this.hours, m.info.symbol, hourIn(now, HISTORY_TZ), BASELINE_MIN_MINUTES);
-    return { score, regime: regime(m.stats.bars(now), score, s.usdPerMin, usual) };
+    const tf = windowMs <= 60_000 ? TIMEFRAMES[1] : windowMs <= 5 * 60_000 ? TIMEFRAMES[5] : TIMEFRAMES[15];
+    return { score, regime: regime(m.stats.bars(now, tf.slowBars + tf.fastBars + 5, tf.barMs), score, s.usdPerMin, usual, tf) };
   }
 
   /** Once a minute: keep the top markets' regime numbers (2 days) so thresholds can be tuned. */

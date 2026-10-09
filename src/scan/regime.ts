@@ -1,11 +1,12 @@
 // Volatility regime: is a market waking up, and is it going anywhere? Pure: no I/O.
 //
-// Built on 1-minute bars of the market's price path (book mid + trade prices, so quiet Vest
-// markets whose market maker tracks the underlying still have a path).
-//   vol×        = ATR of the last 5 bars ÷ ATR of the last 60   (each market against itself)
-//   efficiency  = |net move| ÷ total distance over the last 15 bars   (1 = clean trend, 0 = chop)
+// Built on bars of the market's price path (book mid + trade prices, so quiet Vest markets whose
+// market maker tracks the underlying still have a path). Bar size and look-backs follow the
+// scanner window (TIMEFRAMES): 15-second bars for the 1-minute scalping window, 1-minute bars else.
+//   vol×        = ATR of the last `fast` bars ÷ ATR of the last `slow`   (each market against itself)
+//   efficiency  = |net move| ÷ total distance over the last `eff` bars   (1 = clean trend, 0 = chop)
 //   RVOL        = $/min now ÷ this market's usual $/min for this hour
-//   breakout    = price beyond the high/low of the 60 bars before the last 5
+//   breakout    = price beyond the high/low of the `slow` bars before the last `fast`
 // Thresholds below are STARTING VALUES (owner's plan, 2026-10-09). The scanner records these
 // numbers; retune the cut-offs from where real breakouts and chop fall (CLAUDE.md: measure first).
 
@@ -17,11 +18,25 @@ export interface Bar {
   c: number;
 }
 
+/** Bar size and look-backs per scanner window. `minBars`: fewer complete bars → WARMING. */
+export interface Timeframe {
+  barMs: number;
+  fastBars: number;
+  slowBars: number;
+  effBars: number;
+  minBars: number;
+}
+
+export const TIMEFRAMES: Record<1 | 5 | 15, Timeframe> = {
+  // Scalping: 15-second bars. Vol = last 1 min vs last 15 min; trend over 2 min; breakout vs 15 min.
+  1: { barMs: 15_000, fastBars: 4, slowBars: 60, effBars: 8, minBars: 20 },
+  // 1-minute bars. Vol = last 5 vs last 60 min; trend over 15 min; breakout vs 60 min.
+  5: { barMs: 60_000, fastBars: 5, slowBars: 60, effBars: 15, minBars: 20 },
+  // 1-minute bars. Vol = last 15 vs last 60 min; trend over 30 min; breakout vs 60 min.
+  15: { barMs: 60_000, fastBars: 15, slowBars: 60, effBars: 30, minBars: 35 },
+};
+
 export const REGIME = {
-  fastBars: 5,
-  slowBars: 60,
-  effBars: 15,
-  minBars: 20, // fewer complete bars than this → not enough history to judge
   volExpanding: 1.5,
   volTrending: 1.2,
   effTrend: 0.5,
@@ -82,19 +97,19 @@ export interface Regime {
   opportunity: number;
 }
 
-export function regime(bars: Bar[], liquidity: number | undefined, usdPerMin: number, hourAvgUsdPerMin: number | undefined): Regime {
-  const fast = atr(bars, REGIME.fastBars);
-  const slow = atr(bars, Math.min(REGIME.slowBars, bars.length));
+export function regime(bars: Bar[], liquidity: number | undefined, usdPerMin: number, hourAvgUsdPerMin: number | undefined, tf: Timeframe = TIMEFRAMES[5]): Regime {
+  const fast = atr(bars, tf.fastBars);
+  const slow = atr(bars, Math.min(tf.slowBars, bars.length));
   const volRatio = fast !== undefined && slow !== undefined && slow > 0 ? fast / slow : undefined;
-  const eff = efficiency(bars, REGIME.effBars);
+  const eff = efficiency(bars, tf.effBars);
   const rvol = hourAvgUsdPerMin && hourAvgUsdPerMin > 0 ? usdPerMin / hourAvgUsdPerMin : undefined;
-  const bo = breakout(bars, REGIME.fastBars, REGIME.slowBars);
+  const bo = breakout(bars, tf.fastBars, tf.slowBars);
   const absEff = eff === undefined ? 0 : Math.abs(eff);
   const dir: -1 | 0 | 1 = bo !== 0 ? bo : eff === undefined || absEff < REGIME.effChop ? 0 : eff > 0 ? 1 : -1;
 
   let state: RegimeState;
   if (liquidity === undefined || liquidity < REGIME.minLiquidity) state = 'dead';
-  else if (bars.length < REGIME.minBars || volRatio === undefined || eff === undefined) state = 'warming';
+  else if (bars.length < tf.minBars || volRatio === undefined || eff === undefined) state = 'warming';
   else if (bo !== 0 && volRatio >= REGIME.volExpanding && absEff >= REGIME.effTrend && (rvol === undefined || rvol >= REGIME.rvolHot)) state = 'breakout';
   else if (absEff >= REGIME.effTrend && volRatio >= REGIME.volTrending) state = 'trending';
   else if (volRatio >= REGIME.volExpanding) state = 'expanding';

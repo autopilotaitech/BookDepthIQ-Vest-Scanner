@@ -7,7 +7,7 @@ import { becameActionable, type Regime, type RegimeState } from '../src/scan/reg
 
 // Per-viewer settings (window, filter, alerts, sort) in localStorage; guarded, defaults always work.
 interface Prefs {
-  windowMin: 5 | 15;
+  windowMin: 1 | 5 | 15;
   category: 'all' | Category;
   openOnly: boolean;
   alertsOn: boolean;
@@ -15,12 +15,12 @@ interface Prefs {
   hideChop: boolean;
   sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff';
 }
-const PREFS_KEY = 'scanner.prefs.v2';
-const DEFAULT_PREFS: Prefs = { windowMin: 5, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp' };
+const PREFS_KEY = 'scanner.prefs.v3';
+const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp' };
 
 const STATE_LABEL: Record<RegimeState, string> = { breakout: 'BREAKOUT', trending: 'TRENDING', expanding: 'EXPANDING', chop: 'CHOP', quiet: 'QUIET', dead: 'DEAD', warming: 'WARMING' };
 const STATE_TITLE: Record<RegimeState, string> = {
-  breakout: 'beyond its 60-min high/low with volatility ≥ 1.5× and a clean move: the setup you want',
+  breakout: 'beyond its recent high/low (15 min on the 1-min window, 60 min otherwise) with volatility ≥ 1.5× and a clean move: the setup you want',
   trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×',
   expanding: 'volatility ≥ 1.5× but no clean direction yet: watch',
   chop: 'moving back and forth (efficiency < 0.3): skip',
@@ -170,7 +170,8 @@ export function App() {
         <span className="spacer" />
         <label>
           window
-          <select value={prefs.windowMin} onChange={(e) => update({ windowMin: Number(e.target.value) as 5 | 15 })}>
+          <select value={prefs.windowMin} onChange={(e) => update({ windowMin: Number(e.target.value) as 1 | 5 | 15 })} title="1 min = scalping: 15-second bars, volatility over the last minute vs 15 min">
+            <option value={1}>1 min (scalp)</option>
             <option value={5}>5 min</option>
             <option value={15}>15 min</option>
           </select>
@@ -207,8 +208,8 @@ export function App() {
               <th>Market</th>
               {th('opp', 'Opportunity', 'liquidity × volatility expansion × clean direction, 0–100')}
               <th title="BREAKOUT / TRENDING = trade it · EXPANDING = watch · CHOP / DEAD = skip">State</th>
-              {th('vol', 'Vol ×', 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)')}
-              {th('eff', 'Trend', 'efficiency over 15 one-minute bars: net move ÷ distance travelled (100% = straight line, 0% = chop)')}
+              {th('vol', 'Vol ×', prefs.windowMin === 1 ? 'average 15-s range, last 1 min ÷ last 15 min (1.0 = normal)' : prefs.windowMin === 5 ? 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)' : 'average 1-min range, last 15 min ÷ last 60 min (1.0 = normal)')}
+              {th('eff', 'Trend', `net move ÷ distance travelled over the last ${prefs.windowMin === 1 ? '2' : prefs.windowMin === 5 ? '15' : '30'} min (100% = straight line, 0% = chop)`)}
               <th title="$/min now ÷ this market's usual $/min for this hour">RVOL</th>
               <th>Session</th>
               {th('usd', '$ / min', 'dollars traded per minute over the window')}
@@ -217,7 +218,7 @@ export function App() {
               {th('depth', 'Top-5 depth', 'median of the smaller side of the top 5 levels, in $')}
               <th title="$ traded per minute, last 60 minutes">Last 60 min</th>
               {th('vol24h', '24 h vol', "Vest's 24 h volume")}
-              {th('score', 'Liquidity', 'liquidity score 0–100: $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move 10%')}
+              {th('score', 'Liquidity', 'liquidity score 0–100 over at least the last 5 min (steady fill check): $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move 10%')}
             </tr>
           </thead>
           <tbody>

@@ -31,22 +31,31 @@ npm run build        # creates dist/ — load it with "Load unpacked"
 | Column | Meaning |
 |---|---|
 | **Session** | Vest's own session for the market right now (regular, after hours, overnight…), from its market-hours schedule. "Open now only" hides closed markets. |
-| **$ / min**, **Trades / min** | Real trading over the window (5 or 15 min). The main signal. |
+| **$ / min**, **Trades / min** | Real trading over the window (1, 5 or 15 min). |
 | **Spread bps** | Median spread in basis points of mid: your cost to cross. |
 | **Top-5 depth** | Median $ resting in the top 5 levels (smaller side): size you can trade without walking the book. |
 | **Last 60 min** | $ traded per minute, as a sparkline. |
 | **24 h vol** | Vest's 24-hour volume. |
 | **Score** | 0–100: $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move (range ÷ spread) 10%, each on a log scale. Markets with no prints are capped at 15 and tagged **QUOTED**. ≥ 70 green, 40–69 amber. |
 
-**Catch volatility, skip chop** (v0.2). Each market also gets a regime from its 1-minute bars
-(book mid + trades):
+**Catch volatility, skip chop.** Each market also gets a regime from bars of its price path (book
+mid + trades). The **window** sets the speed:
+
+| Window | Bars | Vol × compares | Trend over | Breakout vs |
+|---|---|---|---|---|
+| **1 min** (scalp, default) | 15 s | last 1 min vs 15 min | 2 min | prior 15 min |
+| 5 min | 1 min | last 5 vs 60 min | 15 min | prior 60 min |
+| 15 min | 1 min | last 15 vs 60 min | 30 min | prior 60 min |
+
+Liquidity (can you get filled?) always uses at least the last 5 minutes: Vest's tape is thin, so a
+one-minute read would call good markets dead between prints.
 
 | Column | Meaning |
 |---|---|
 | **Opportunity** | 0–100: liquidity × volatility expansion × clean direction. The default sort. |
 | **State** | **▲/▼ BREAKOUT** (beyond its 60-min high/low, vol ≥ 1.5×, clean move) and **TRENDING** (efficiency ≥ 0.5, vol ≥ 1.2×) are the trades; **EXPANDING** (vol ≥ 1.5×, no direction yet) is a watch; **CHOP** (efficiency < 0.3) and **DEAD** (liquidity < 40) are skips. |
-| **Vol ×** | average 1-min range over the last 5 min ÷ last 60 min. 1.0 = normal. |
-| **Trend** | efficiency over 15 bars: net move ÷ distance travelled (100% = straight line, 0% = chop). |
+| **Vol ×** | recent average bar range ÷ the longer baseline (see the table above). 1.0 = normal. |
+| **Trend** | net move ÷ distance travelled (100% = straight line, 0% = chop), with direction. |
 | **RVOL** | $/min now ÷ this market's usual $/min for this hour (needs 30 recorded minutes for the hour; **Backfill last 24 h** gives it at once). |
 
 - **Hide chop** removes CHOP and DEAD rows. **Alerts** fire when a liquid market enters

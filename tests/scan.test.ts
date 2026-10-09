@@ -108,7 +108,7 @@ describe('liquid by hour', () => {
   });
 });
 
-import { REGIME, atr, becameActionable, breakout, efficiency, regime, type Bar } from '../src/scan/regime.js';
+import { REGIME, TIMEFRAMES, atr, becameActionable, breakout, efficiency, regime, type Bar } from '../src/scan/regime.js';
 
 const bar = (i: number, o: number, h: number, l: number, c: number): Bar => ({ t: i * 60_000, o, h, l, c });
 /** n flat-ish bars around `p` with range `r`. */
@@ -143,6 +143,7 @@ describe('regime', () => {
     expect(regime([...base, ...run], 20, 2000, 1000).state).toBe('dead'); // not liquid
     expect(regime(quiet(10, 100, 1), 80, 1000, 1000).state).toBe('warming');
     expect(REGIME.effChop).toBeLessThan(REGIME.effTrend);
+    expect(TIMEFRAMES[1].barMs).toBe(15_000);
   });
 
   it('alerts on entering breakout/trending only', () => {
@@ -175,5 +176,29 @@ describe('RVOL baseline', () => {
     expect(avgPerMin(map, 'NQ', 8, 30)).toBeUndefined();
     addMinute(map, 'NQ', t + 29 * 60_000, 1000, 'America/Chicago');
     expect(avgPerMin(map, 'NQ', 8, 30)).toBe(1000);
+  });
+});
+
+describe('1-minute scalping window', () => {
+  it('15-second bars, merged into 1-minute bars on request', () => {
+    const s = new MarketStats();
+    s.addTrade(1_000, 100, 1); // 0–15 s
+    s.addTrade(16_000, 102, 1); // 15–30 s
+    s.addTrade(31_000, 101, 1); // 30–45 s
+    const fine = s.bars(60_000, 10, 15_000);
+    expect(fine.map((b) => b.c)).toEqual([100, 102, 101, 101]); // last 15 s flat-filled
+    expect(s.bars(59_000, 10, 60_000)).toEqual([]); // minute 0 still open
+    const minute = s.bars(60_000, 10, 60_000); // minute 0 complete
+    expect(minute.map((b) => [b.o, b.h, b.l, b.c])).toEqual([[100, 102, 100, 101]]);
+  });
+
+  it('a move inside the last minute shows on the 1-min window', () => {
+    // 15 min of calm 15-s bars, then 1 minute (4 bars) of a clean run up
+    const calm = Array.from({ length: 60 }, (_, i) => ({ t: i * 15_000, o: 100, h: 100.25, l: 99.75, c: i % 2 ? 100.1 : 99.9 }));
+    const run = Array.from({ length: 4 }, (_, i) => ({ t: (60 + i) * 15_000, o: 100.5 + i, h: 101.5 + i, l: 100.5 + i, c: 101.5 + i }));
+    const r = regime([...calm, ...run], 80, 5000, undefined, TIMEFRAMES[1]);
+    expect(r.volRatio!).toBeGreaterThan(1.5);
+    expect(r.dir).toBe(1);
+    expect(['breakout', 'trending']).toContain(r.state);
   });
 });
