@@ -1,0 +1,75 @@
+/* Vest Liquidity Scanner — same dark trading palette as the BookDepthIQ-Vest panel. */
+:root {
+  --bg: #0b0e14;
+  --panel: #111621;
+  --panel2: #161c28;
+  --line: #232b3a;
+  --fg: #e3e8f0;
+  --muted: #8b95a8;
+  --faint: #5d6676;
+  --live: #4ade80;
+  --warn: #facc15;
+  --dead: #f87171;
+  --accent: #c084fc;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 'Segoe UI', system-ui, sans-serif; }
+button, select, input { font: inherit; color: var(--fg); background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 8px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button:disabled { opacity: 0.6; cursor: default; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.muted { color: var(--muted); }
+.spacer { flex: 1; }
+.app { display: flex; flex-direction: column; min-height: 100vh; }
+
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 14px; background: var(--panel2); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+.bar .title { font-weight: 700; letter-spacing: 0.06em; }
+.bar label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.bar input[type='number'] { width: 56px; }
+
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 99px; font: 600 11px ui-monospace, Consolas, monospace; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.chip i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.live { color: var(--live); }
+.chip.ah { color: var(--warn); }
+.chip.closed { color: var(--dead); }
+
+.cats { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.cats button.on { border-color: var(--accent); color: var(--accent); }
+
+.toast { margin: 8px 14px 0; padding: 8px 12px; border-radius: 6px; background: #0f2a1c; color: var(--live); font-weight: 600; cursor: pointer; }
+
+.tablewrap { overflow-x: auto; }
+table { width: 100%; min-width: 900px; border-collapse: collapse; font: 13px ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+th { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; position: sticky; top: 48px; background: var(--bg); }
+th button { background: none; border: 0; padding: 0; color: inherit; text-transform: inherit; letter-spacing: inherit; font: inherit; }
+th button.on { color: var(--accent); }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+td { text-align: right; padding: 7px 10px; border-bottom: 1px solid #171d29; white-space: nowrap; }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: var(--panel); }
+tr.top td:first-child { box-shadow: inset 3px 0 0 var(--live); }
+.sym { font-weight: 600; }
+.quoted { color: var(--dead); font-size: 10px; font-weight: 700; letter-spacing: 0.05em; }
+.score { display: inline-block; min-width: 40px; text-align: center; border-radius: 4px; font-weight: 700; color: var(--faint); }
+.s-hi { background: rgba(74, 222, 128, 0.18); color: var(--live); }
+.s-mid { background: rgba(250, 204, 21, 0.16); color: var(--warn); }
+.s-lo { background: rgba(248, 113, 113, 0.14); color: var(--dead); }
+.spark { vertical-align: middle; }
+td.empty { text-align: center; padding: 24px; }
+
+.hours { padding: 14px; border-top: 1px solid var(--line); margin-top: 8px; }
+.hourshead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 10px; }
+.hours h2 { margin: 0; font-size: 14px; }
+.ghost { background: none; }
+.heat { display: grid; grid-template-columns: 130px repeat(24, minmax(20px, 1fr)); gap: 2px; font: 11px ui-monospace, Consolas, monospace; overflow-x: auto; min-width: 640px; }
+.heat .hrow { display: contents; }
+.heat .h { color: var(--faint); text-align: center; }
+.heat .h.now { color: var(--accent); font-weight: 700; }
+.heat .m { align-self: center; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.heat .c { height: 20px; border-radius: 2px; background: var(--live); }
+.heat .c.none { background: var(--panel2); }
+.heat .c.now { outline: 1px solid var(--accent); }
+
+footer { padding: 10px 14px 16px; font-size: 12px; }

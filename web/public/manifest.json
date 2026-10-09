@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Vest Liquidity Scanner",
+  "version": "0.1.0",
+  "description": "Ranks Vest Markets perps by real trading activity. Read-only: public data, no login, no orders.",
+  "action": { "default_title": "Open Vest Liquidity Scanner" },
+  "background": { "service_worker": "background.js" },
+  "permissions": ["notifications"],
+  "host_permissions": [
+    "https://api-gateway.hz.vestmarkets.com/*",
+    "wss://ws.hz.vestmarkets.com/*"
+  ],
+  "icons": { "128": "icon128.png" }
+}
