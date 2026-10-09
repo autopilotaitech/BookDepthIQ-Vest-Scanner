@@ -107,3 +107,73 @@ describe('liquid by hour', () => {
     expect(avgPerMin(map, 'ES', 8)).toBe(200); // 600 over 3 minutes
   });
 });
+
+import { REGIME, atr, becameActionable, breakout, efficiency, regime, type Bar } from '../src/scan/regime.js';
+
+const bar = (i: number, o: number, h: number, l: number, c: number): Bar => ({ t: i * 60_000, o, h, l, c });
+/** n flat-ish bars around `p` with range `r`. */
+const quiet = (n: number, p: number, r: number, from = 0) => Array.from({ length: n }, (_, i) => bar(from + i, p, p + r / 2, p - r / 2, p + (i % 2 ? r / 4 : -r / 4)));
+
+describe('regime', () => {
+  it('ATR and efficiency', () => {
+    const up = Array.from({ length: 16 }, (_, i) => bar(i, 100 + i, 101 + i, 100 + i, 101 + i));
+    expect(atr(up, 5)).toBeCloseTo(1);
+    expect(efficiency(up, 15)).toBeCloseTo(1); // straight line up
+    const zig = Array.from({ length: 16 }, (_, i) => bar(i, 100, 101, 99, i % 2 ? 101 : 99));
+    expect(Math.abs(efficiency(zig, 15)!)).toBeLessThan(0.1); // back and forth
+  });
+
+  it('breakout above the prior 60-bar high', () => {
+    const base = quiet(60, 100, 2);
+    const run = Array.from({ length: 5 }, (_, i) => bar(60 + i, 101 + i, 103 + i, 101 + i, 103 + i));
+    expect(breakout([...base, ...run], 5, 60)).toBe(1);
+    expect(breakout(quiet(65, 100, 2), 5, 60)).toBe(0);
+  });
+
+  it('states: breakout, chop, dead, warming', () => {
+    const base = quiet(60, 100, 1);
+    const run = Array.from({ length: 5 }, (_, i) => bar(60 + i, 101 + 2 * i, 103 + 2 * i, 101 + 2 * i, 103 + 2 * i));
+    const bo = regime([...base, ...run], 80, 2000, 1000);
+    expect(bo.state).toBe('breakout');
+    expect(bo.dir).toBe(1);
+    expect(bo.opportunity).toBeGreaterThan(50);
+
+    const zig = Array.from({ length: 70 }, (_, i) => bar(i, 100, 101, 99, i % 2 ? 101 : 99));
+    expect(regime(zig, 80, 1000, 1000).state).toBe('chop');
+    expect(regime([...base, ...run], 20, 2000, 1000).state).toBe('dead'); // not liquid
+    expect(regime(quiet(10, 100, 1), 80, 1000, 1000).state).toBe('warming');
+    expect(REGIME.effChop).toBeLessThan(REGIME.effTrend);
+  });
+
+  it('alerts on entering breakout/trending only', () => {
+    expect(becameActionable('chop', 'breakout')).toBe(true);
+    expect(becameActionable('trending', 'breakout')).toBe(false);
+    expect(becameActionable(undefined, 'trending')).toBe(false); // first sight is not an alert
+  });
+});
+
+describe('MarketStats bars', () => {
+  it('builds minute bars from mids and trades, filling quiet minutes flat', () => {
+    const s = new MarketStats();
+    s.addDepth(1_000, [L(99, 1)], [L(101, 1)]); // mid 100 in minute 0
+    s.addTrade(61_000, 103, 1); // minute 1
+    s.addTrade(62_000, 102, 1);
+    const b = s.bars(3 * 60_000 + 5_000); // minutes 0, 1, 2 complete
+    expect(b.map((x) => [x.o, x.h, x.l, x.c])).toEqual([
+      [100, 100, 100, 100],
+      [103, 103, 102, 102],
+      [102, 102, 102, 102], // minute 2: no price → flat at the previous close
+    ]);
+  });
+});
+
+describe('RVOL baseline', () => {
+  it('needs enough observed minutes before it is used', () => {
+    const map = {};
+    const t = Date.UTC(2026, 9, 9, 13, 0);
+    for (let i = 0; i < 29; i++) addMinute(map, 'NQ', t + i * 60_000, 1000, 'America/Chicago');
+    expect(avgPerMin(map, 'NQ', 8, 30)).toBeUndefined();
+    addMinute(map, 'NQ', t + 29 * 60_000, 1000, 'America/Chicago');
+    expect(avgPerMin(map, 'NQ', 8, 30)).toBe(1000);
+  });
+});

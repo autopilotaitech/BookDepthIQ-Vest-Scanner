@@ -8,7 +8,9 @@ import { fetch24h, fetchExchangeInfo, fetchMarketHours, fetchTradesBefore, type 
 import type { SymbolInfo } from '../src/vest/types';
 import { MarketStats } from '../src/scan/metrics';
 import { categoryOf, sessionAt, type Category, type SessionNow } from '../src/scan/score';
-import { addHistory, addMinute, type HourMap } from '../src/scan/history';
+import { BASELINE_MIN_MINUTES, addHistory, addMinute, avgPerMin, hourIn, type HourMap } from '../src/scan/history';
+import { liquidityScore } from '../src/scan/score';
+import { regime, type Regime } from '../src/scan/regime';
 
 export interface Market {
   info: SymbolInfo;
@@ -20,7 +22,22 @@ export interface Market {
 }
 
 const HISTORY_KEY = 'scanner.hours.v1';
-const HISTORY_TZ = 'America/Chicago';
+export const HISTORY_TZ = 'America/Chicago';
+const RECORD_KEY = 'scanner.regime.v1';
+const RECORD_MARKETS = 8; // top markets by 24 h volume
+const RECORD_KEEP_MS = 2 * 24 * 3600_000;
+
+/** One recorded minute of regime numbers, for tuning the thresholds later. */
+export interface RegimeRecord {
+  t: number;
+  sym: string;
+  score: number | undefined;
+  vol: number | undefined;
+  eff: number | undefined;
+  rvol: number | undefined;
+  bo: number;
+  state: string;
+}
 
 export class Engine {
   markets = new Map<string, Market>();
@@ -28,12 +45,15 @@ export class Engine {
   statusDetail = '';
   warming = 0; // markets still warming up from history
   hours: HourMap = loadHours();
+  records: RegimeRecord[] = loadRecords();
   backfilling = '';
   private table: SymbolTable | null = null;
   private sock: VestMarketSocket | null = null;
   private hoursAsset = new Map<number, MarketHoursAsset>();
   private timers: ReturnType<typeof setInterval>[] = [];
   private lastMinute = Math.floor(Date.now() / 60_000);
+  /** Only minutes that started after this were fully observed (and may be recorded). */
+  private readonly startedAt = Date.now();
   private listeners = new Set<() => void>();
   private dirty = false;
 
@@ -109,13 +129,14 @@ export class Engine {
   private tick(): void {
     const now = Date.now();
     const minute = Math.floor(now / 60_000);
-    if (minute > this.lastMinute && this.status === 'live') {
+    if (minute > this.lastMinute && this.status === 'live' && (minute - 1) * 60_000 >= this.startedAt) {
       const start = (minute - 1) * 60_000;
       for (const [sym, m] of this.markets) {
         const usd = m.stats.perMinute(start + 30_000, 1)[0] ?? 0;
         if (m.session.open) addMinute(this.hours, sym, start, usd, HISTORY_TZ);
       }
       saveHours(this.hours);
+      this.recordRegimes(now);
     }
     this.lastMinute = minute;
     for (const m of this.markets.values()) m.stats.prune(now);
@@ -218,6 +239,36 @@ export class Engine {
     this.changed();
   }
 
+  /** Regime for a market right now: liquidity score, volatility, trend vs chop, relative volume. */
+  regimeOf(m: Market, now: number, windowMs: number): { score: number | undefined; regime: Regime } {
+    const s = m.stats.summary(now, windowMs);
+    const score = m.session.open ? liquidityScore(s) : undefined;
+    const usual = avgPerMin(this.hours, m.info.symbol, hourIn(now, HISTORY_TZ), BASELINE_MIN_MINUTES);
+    return { score, regime: regime(m.stats.bars(now), score, s.usdPerMin, usual) };
+  }
+
+  /** Once a minute: keep the top markets' regime numbers (2 days) so thresholds can be tuned. */
+  private recordRegimes(now: number): void {
+    const top = [...this.markets.values()].sort((a, b) => b.vol24h - a.vol24h).slice(0, RECORD_MARKETS);
+    for (const m of top) {
+      const { score, regime: r } = this.regimeOf(m, now, 5 * 60_000);
+      this.records.push({ t: now, sym: m.display, score, vol: r.volRatio, eff: r.eff, rvol: r.rvol, bo: r.breakout, state: r.state });
+    }
+    const cut = now - RECORD_KEEP_MS;
+    while (this.records.length && this.records[0]!.t < cut) this.records.shift();
+    try {
+      localStorage.setItem(RECORD_KEY, JSON.stringify(this.records));
+    } catch {
+      /* storage full or unavailable: keep in memory */
+    }
+  }
+
+  /** The recorded minutes as CSV (for tuning). */
+  recordsCsv(): string {
+    const f = (v: number | undefined, d = 3) => (v === undefined || !Number.isFinite(v) ? '' : v.toFixed(d));
+    return ['time,market,score,vol_ratio,efficiency,rvol,breakout,state', ...this.records.map((r) => `${new Date(r.t).toISOString()},${r.sym},${r.score ?? ''},${f(r.vol)},${f(r.eff)},${f(r.rvol)},${r.bo},${r.state}`)].join('\n');
+  }
+
   clearHours(): void {
     this.hours = {};
     saveHours(this.hours);
@@ -235,6 +286,15 @@ function loadHours(): HourMap {
     return raw ? (JSON.parse(raw) as HourMap) : {};
   } catch {
     return {};
+  }
+}
+
+function loadRecords(): RegimeRecord[] {
+  try {
+    const raw = localStorage.getItem(RECORD_KEY);
+    return raw ? (JSON.parse(raw) as RegimeRecord[]) : [];
+  } catch {
+    return [];
   }
 }
 

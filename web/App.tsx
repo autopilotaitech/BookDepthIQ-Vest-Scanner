@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Engine, type Market } from './engine';
-import { crossedUp, liquidityScore, type Category } from '../src/scan/score';
+import type { Category } from '../src/scan/score';
 import { avgPerMin } from '../src/scan/history';
 import type { Summary } from '../src/scan/metrics';
+import { becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
 
 // Per-viewer settings (window, filter, alerts, sort) in localStorage; guarded, defaults always work.
 interface Prefs {
@@ -10,11 +11,23 @@ interface Prefs {
   category: 'all' | Category;
   openOnly: boolean;
   alertsOn: boolean;
-  alertAt: number;
-  sort: 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h';
+  /** Hide CHOP and DEAD markets. */
+  hideChop: boolean;
+  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff';
 }
-const PREFS_KEY = 'scanner.prefs.v1';
-const DEFAULT_PREFS: Prefs = { windowMin: 5, category: 'all', openOnly: true, alertsOn: false, alertAt: 70, sort: 'score' };
+const PREFS_KEY = 'scanner.prefs.v2';
+const DEFAULT_PREFS: Prefs = { windowMin: 5, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp' };
+
+const STATE_LABEL: Record<RegimeState, string> = { breakout: 'BREAKOUT', trending: 'TRENDING', expanding: 'EXPANDING', chop: 'CHOP', quiet: 'QUIET', dead: 'DEAD', warming: 'WARMING' };
+const STATE_TITLE: Record<RegimeState, string> = {
+  breakout: 'beyond its 60-min high/low with volatility ≥ 1.5× and a clean move: the setup you want',
+  trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×',
+  expanding: 'volatility ≥ 1.5× but no clean direction yet: watch',
+  chop: 'moving back and forth (efficiency < 0.3): skip',
+  quiet: 'liquid but calm',
+  dead: 'not liquid enough to fill (score < 40) or quoted only',
+  warming: 'collecting at least 20 one-minute bars',
+};
 function loadPrefs(): Prefs {
   try {
     return { ...DEFAULT_PREFS, ...(JSON.parse(localStorage.getItem(PREFS_KEY) ?? '{}') as Partial<Prefs>) };
@@ -42,6 +55,7 @@ interface Row {
   m: Market;
   s: Summary;
   score: number | undefined;
+  r: Regime;
   spark: number[];
 }
 
@@ -62,7 +76,7 @@ export function App() {
   const [, setTick] = useState(0);
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
   const [toast, setToast] = useState<string>('');
-  const prevScores = useRef(new Map<string, number | undefined>());
+  const prevStates = useRef(new Map<string, RegimeState>());
   const lastAlert = useRef(new Map<string, number>());
 
   useEffect(() => {
@@ -89,17 +103,18 @@ export function App() {
   const windowMs = prefs.windowMin * 60_000;
   const rows: Row[] = [...engine.markets.values()].map((m) => {
     const s = m.stats.summary(now, windowMs);
-    return { m, s, score: m.session.open ? liquidityScore(s) : undefined, spark: m.stats.perMinute(now, 60) };
+    const { score, regime: r } = engine.regimeOf(m, now, windowMs);
+    return { m, s, score, r, spark: m.stats.perMinute(now, 60) };
   });
 
-  // Alerts: a market crossing up through the threshold (10-minute cooldown per market).
+  // Alerts: a liquid market entering BREAKOUT or TRENDING (10-minute cooldown per market).
   useEffect(() => {
     for (const r of rows) {
       const sym = r.m.info.symbol;
-      const prev = prevScores.current.get(sym);
-      if (prefs.alertsOn && engine.warming === 0 && crossedUp(prev, r.score, prefs.alertAt) && now - (lastAlert.current.get(sym) ?? 0) > 10 * 60_000) {
+      const prev = prevStates.current.get(sym);
+      if (prefs.alertsOn && engine.warming === 0 && becameActionable(prev, r.r.state) && now - (lastAlert.current.get(sym) ?? 0) > 10 * 60_000) {
         lastAlert.current.set(sym, now);
-        const msg = `${r.m.display} just went liquid: score ${r.score}, ${fmtUsd(r.s.usdPerMin)}/min`;
+        const msg = `${r.m.display} ${r.r.dir > 0 ? '▲' : r.r.dir < 0 ? '▼' : ''} ${STATE_LABEL[r.r.state]}: vol ${r.r.volRatio?.toFixed(1) ?? '?'}×, ${fmtUsd(r.s.usdPerMin)}/min`;
         setToast(msg);
         const chrome = (globalThis as { chrome?: { notifications?: { create(o: object): void } } }).chrome;
         try {
@@ -108,17 +123,18 @@ export function App() {
           /* in-page toast only */
         }
       }
-      prevScores.current.set(sym, r.score);
+      prevStates.current.set(sym, r.r.state);
     }
   });
 
   const visible = rows
     .filter((r) => prefs.category === 'all' || r.m.category === prefs.category)
     .filter((r) => !prefs.openOnly || r.m.session.open)
+    .filter((r) => !prefs.hideChop || (r.r.state !== 'chop' && r.r.state !== 'dead'))
     .sort((a, b) => {
       const k = prefs.sort;
       const v = (r: Row) =>
-        k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
+        k === 'opp' ? r.r.opportunity : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
       return v(b) - v(a);
     });
 
@@ -162,9 +178,11 @@ export function App() {
         <label>
           <input type="checkbox" checked={prefs.openOnly} onChange={(e) => update({ openOnly: e.target.checked })} /> open now only
         </label>
-        <label title="notify when a market's score crosses up through this">
-          <input type="checkbox" checked={prefs.alertsOn} onChange={(e) => update({ alertsOn: e.target.checked })} /> alert at
-          <input type="number" min={10} max={100} step={5} value={prefs.alertAt} onChange={(e) => update({ alertAt: Math.max(10, Math.min(100, Number(e.target.value) || 70)) })} />
+        <label title="hide markets that are chopping or too thin to fill">
+          <input type="checkbox" checked={prefs.hideChop} onChange={(e) => update({ hideChop: e.target.checked })} /> hide chop
+        </label>
+        <label title="notify when a liquid market enters BREAKOUT or TRENDING">
+          <input type="checkbox" checked={prefs.alertsOn} onChange={(e) => update({ alertsOn: e.target.checked })} /> alert on breakout / trend
         </label>
       </header>
 
@@ -187,6 +205,11 @@ export function App() {
           <thead>
             <tr>
               <th>Market</th>
+              {th('opp', 'Opportunity', 'liquidity × volatility expansion × clean direction, 0–100')}
+              <th title="BREAKOUT / TRENDING = trade it · EXPANDING = watch · CHOP / DEAD = skip">State</th>
+              {th('vol', 'Vol ×', 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)')}
+              {th('eff', 'Trend', 'efficiency over 15 one-minute bars: net move ÷ distance travelled (100% = straight line, 0% = chop)')}
+              <th title="$/min now ÷ this market's usual $/min for this hour">RVOL</th>
               <th>Session</th>
               {th('usd', '$ / min', 'dollars traded per minute over the window')}
               {th('trades', 'Trades / min', 'prints per minute over the window')}
@@ -194,7 +217,7 @@ export function App() {
               {th('depth', 'Top-5 depth', 'median of the smaller side of the top 5 levels, in $')}
               <th title="$ traded per minute, last 60 minutes">Last 60 min</th>
               {th('vol24h', '24 h vol', "Vest's 24 h volume")}
-              {th('score', 'Score', 'liquidity score 0–100: $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move 10%')}
+              {th('score', 'Liquidity', 'liquidity score 0–100: $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move 10%')}
             </tr>
           </thead>
           <tbody>
@@ -205,6 +228,18 @@ export function App() {
                   <td>
                     <span className="sym">{r.m.display}</span> {r.s.quoted && <span className="quoted" title="the book is moving but nothing traded: market-maker quotes only">QUOTED</span>}
                   </td>
+                  <td>
+                    <span className={`opp ${r.r.opportunity >= 50 ? 's-hi' : r.r.opportunity >= 25 ? 's-mid' : ''}`}>{r.r.state === 'dead' || r.r.state === 'warming' ? '—' : r.r.opportunity}</span>
+                  </td>
+                  <td>
+                    <span className={`state st-${r.r.state}`} title={STATE_TITLE[r.r.state]}>
+                      {r.r.dir > 0 ? '▲ ' : r.r.dir < 0 ? '▼ ' : ''}
+                      {STATE_LABEL[r.r.state]}
+                    </span>
+                  </td>
+                  <td className={r.r.volRatio !== undefined && r.r.volRatio >= 1.5 ? 'hot' : ''}>{r.r.volRatio === undefined ? '—' : `${r.r.volRatio.toFixed(1)}×`}</td>
+                  <td>{r.r.eff === undefined ? '—' : `${r.r.eff > 0 ? '▲' : r.r.eff < 0 ? '▼' : ''}${Math.round(Math.abs(r.r.eff) * 100)}%`}</td>
+                  <td className={r.r.rvol !== undefined && r.r.rvol >= 1.5 ? 'hot' : ''}>{r.r.rvol === undefined ? '—' : `${r.r.rvol.toFixed(1)}×`}</td>
                   <td>
                     <span className={`chip ${!r.m.session.open ? 'closed' : r.m.session.session === 'regular' || r.m.session.session === 'open' ? 'live' : 'ah'}`}>
                       <i />
@@ -227,7 +262,7 @@ export function App() {
             })}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={9} className="muted empty">
+                <td colSpan={14} className="muted empty">
                   {engine.status === 'starting' ? 'Loading Vest markets…' : 'No markets match this filter right now.'}
                 </td>
               </tr>
@@ -268,7 +303,16 @@ export function App() {
         </div>
       </section>
 
-      <footer className="muted">Read-only: public Vest data, no login, no orders. Click a row to open that market on Vest.</footer>
+      <footer className="muted">
+        Read-only: public Vest data, no login, no orders. Click a row to open that market on Vest. Recorded {engine.records.length} regime minutes for tuning{' '}
+        <button
+          className="ghost"
+          title="copy the recorded minutes (time, market, score, vol ×, efficiency, RVOL, breakout, state) as CSV"
+          onClick={() => void navigator.clipboard?.writeText(engine.recordsCsv()).then(() => setToast('Recorded stats copied as CSV'), () => setToast('Copy failed'))}
+        >
+          Copy as CSV
+        </button>
+      </footer>
     </div>
   );
 }

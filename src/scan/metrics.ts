@@ -1,6 +1,7 @@
 // Per-market rolling statistics from Vest's public trade and depth streams. Pure: no I/O.
 
 import { ladderScore } from '../book/stats.js';
+import type { Bar } from './regime.js';
 
 export interface Summary {
   /** $ traded per minute over the window. */
@@ -41,10 +42,46 @@ export class MarketStats {
   private updates: number[] = [];
   private lastDepthAt = -Infinity;
   ladder = 0;
+  /** 1-minute bars of the price path (book mid + trades), minute start → bar. Kept 75 minutes. */
+  private barMap = new Map<number, Bar>();
+
+  /** Fold a price into its minute's bar. */
+  private mark(t: number, price: number): void {
+    if (!(price > 0)) return;
+    const m = Math.floor(t / 60_000) * 60_000;
+    const b = this.barMap.get(m);
+    if (!b) this.barMap.set(m, { t: m, o: price, h: price, l: price, c: price });
+    else {
+      b.h = Math.max(b.h, price);
+      b.l = Math.min(b.l, price);
+      if (t >= m) b.c = price;
+    }
+  }
+
+  /**
+   * Complete 1-minute bars up to (not including) the current minute, oldest first. Minutes with no
+   * price are filled flat at the previous close: no movement is information too.
+   */
+  bars(now: number, max = 75): Bar[] {
+    const cur = Math.floor(now / 60_000) * 60_000;
+    const keys = [...this.barMap.keys()].filter((k) => k < cur).sort((a, b) => a - b);
+    if (!keys.length) return [];
+    const out: Bar[] = [];
+    let prev: Bar | undefined;
+    for (let m = Math.max(keys[0]!, cur - max * 60_000); m < cur; m += 60_000) {
+      const b = this.barMap.get(m);
+      if (b) {
+        out.push({ ...b });
+        prev = b;
+      } else if (prev) out.push({ t: m, o: prev.c, h: prev.c, l: prev.c, c: prev.c });
+    }
+    return out;
+  }
 
   addTrade(t: number, price: number, qty: number): void {
     if (!(price > 0) || !(qty > 0)) return;
     this.trades.push({ t, price, usd: price * qty });
+    this.mark(t, price);
     // trades usually arrive in order; history backfill may not, so keep them sorted
     const n = this.trades.length;
     if (n > 1 && this.trades[n - 2]!.t > t) this.trades.sort((a, b) => a.t - b.t);
@@ -60,6 +97,7 @@ export class MarketStats {
     const mid = (bb + ba) / 2;
     if (!(mid > 0) || !(ba >= bb)) return;
     this.lastDepthAt = t;
+    this.mark(t, mid);
     const top5 = (side: Array<[string, string]>) => side.slice(0, 5).reduce((x, l) => x + Number(l[0]) * Number(l[1]), 0);
     this.depth.push({ t, spreadBps: ((ba - bb) / mid) * 1e4, top5Usd: Math.min(top5(bids), top5(asks)) });
     this.ladder = ladderScore([...bids, ...asks].map((l) => Number(l[1]))).score;
@@ -74,6 +112,8 @@ export class MarketStats {
     const cutD = now - KEEP_DEPTH_MS;
     while (this.depth.length && this.depth[0]!.t < cutD) this.depth.shift();
     while (this.updates.length && this.updates[0]! < cutD) this.updates.shift();
+    const cutB = now - 75 * 60_000;
+    for (const k of this.barMap.keys()) if (k < cutB) this.barMap.delete(k);
   }
 
   summary(now: number, windowMs: number): Summary {

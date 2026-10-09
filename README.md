@@ -38,10 +38,24 @@ npm run build        # creates dist/ — load it with "Load unpacked"
 | **24 h vol** | Vest's 24-hour volume. |
 | **Score** | 0–100: $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move (range ÷ spread) 10%, each on a log scale. Markets with no prints are capped at 15 and tagged **QUOTED**. ≥ 70 green, 40–69 amber. |
 
+**Catch volatility, skip chop** (v0.2). Each market also gets a regime from its 1-minute bars
+(book mid + trades):
+
+| Column | Meaning |
+|---|---|
+| **Opportunity** | 0–100: liquidity × volatility expansion × clean direction. The default sort. |
+| **State** | **▲/▼ BREAKOUT** (beyond its 60-min high/low, vol ≥ 1.5×, clean move) and **TRENDING** (efficiency ≥ 0.5, vol ≥ 1.2×) are the trades; **EXPANDING** (vol ≥ 1.5×, no direction yet) is a watch; **CHOP** (efficiency < 0.3) and **DEAD** (liquidity < 40) are skips. |
+| **Vol ×** | average 1-min range over the last 5 min ÷ last 60 min. 1.0 = normal. |
+| **Trend** | efficiency over 15 bars: net move ÷ distance travelled (100% = straight line, 0% = chop). |
+| **RVOL** | $/min now ÷ this market's usual $/min for this hour (needs 30 recorded minutes for the hour; **Backfill last 24 h** gives it at once). |
+
+- **Hide chop** removes CHOP and DEAD rows. **Alerts** fire when a liquid market enters
+  BREAKOUT or TRENDING.
+- The cut-offs are starting values. The scanner records these numbers every minute for the top 8
+  markets (2 days); **Copy as CSV** in the footer exports them so the cut-offs can be tuned.
+
 - **Filter** by index, crypto, stocks, ETFs, commodities or FX. **Sort** by any column.
 - **Click a row** to open that market on Vest.
-- **Alerts:** tick *alert at* and set a score; you get a notification when a market's score
-  crosses up through it (10-minute cooldown per market).
 - **Liquid by hour (Chicago):** average $ per minute per hour of the day for the top 12 markets.
   It builds while the window is open; **Backfill last 24 h** fills it from Vest's trade history.
 

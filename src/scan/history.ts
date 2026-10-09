@@ -32,11 +32,14 @@ export function addMinute(map: HourMap, symbol: string, minuteStartMs: number, u
   b[h]!.minutes += 1;
 }
 
-/** Average $ per minute for a market and hour, undefined if never observed. */
-export function avgPerMin(map: HourMap, symbol: string, hour: number): number | undefined {
+/** Average $ per minute for a market and hour; undefined until `minMinutes` were observed. */
+export function avgPerMin(map: HourMap, symbol: string, hour: number, minMinutes = 1): number | undefined {
   const b = map[symbol]?.[hour];
-  return b && b.minutes > 0 ? b.usd / b.minutes : undefined;
+  return b && b.minutes >= Math.max(1, minMinutes) ? b.usd / b.minutes : undefined;
 }
+
+/** A usable "usual volume" baseline needs at least this many observed minutes for the hour. */
+export const BASELINE_MIN_MINUTES = 30;
 
 /**
  * Backfill from trade history: trades are bucketed by minute; every minute from the first to the

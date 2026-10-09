@@ -73,3 +73,13 @@ td.empty { text-align: center; padding: 24px; }
 .heat .c.now { outline: 1px solid var(--accent); }
 
 footer { padding: 10px 14px 16px; font-size: 12px; }
+
+/* v0.2 regime */
+.state { display: inline-block; padding: 1px 8px; border-radius: 4px; font-weight: 700; font-size: 11px; letter-spacing: 0.04em; border: 1px solid var(--line); color: var(--faint); }
+.st-breakout { background: rgba(74, 222, 128, 0.22); color: var(--live); border-color: var(--live); }
+.st-trending { background: rgba(74, 222, 128, 0.12); color: var(--live); }
+.st-expanding { background: rgba(250, 204, 21, 0.14); color: var(--warn); }
+.st-chop { color: var(--dead); }
+.st-quiet { color: var(--muted); }
+.opp { display: inline-block; min-width: 34px; text-align: center; border-radius: 4px; font-weight: 700; color: var(--faint); }
+td.hot { color: var(--warn); font-weight: 700; }
