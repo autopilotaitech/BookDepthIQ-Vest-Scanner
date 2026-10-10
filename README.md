@@ -7,7 +7,9 @@ can alert you when a market wakes up.
 **Read-only:** public Vest data only. No login, no account access, no orders. A companion to
 [BookDepthIQ-Vest](https://github.com/autopilotaitech/BookDepthIQ-Vest), the trading panel.
 
-> **Beta.** Scores use starting weights that will be tuned against recorded scans.
+> **Beta.** Scores and regime cut-offs are starting values that will be tuned against recorded
+> scans (footer → **Copy as CSV**). A market needs about 5 minutes of data before its state
+> leaves WARMING.
 
 ## Why it ranks trades, not the book
 
@@ -18,13 +20,36 @@ scanner ranks on prints and flags books that move with no trades as **QUOTED**.
 
 ## Install
 
+**Easy way (no Node needed):**
+
+1. Download the latest `Vest-Liquidity-Scanner-vX.Y.Z.zip` from
+   [**Releases**](https://github.com/autopilotaitech/BookDepthIQ-Vest-Scanner/releases/latest).
+2. Unzip it to a folder you'll keep, for example `C:\VestScanner`.
+3. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick the
+   unzipped folder.
+4. Pin the **Vest Liquidity Scanner** icon and click it. The scanner opens in its own window and
+   scans while that window is open.
+
+**To update:** download the new zip, unzip it over the same folder, press reload on the
+extension in `chrome://extensions`, then reopen the scanner.
+
+**From source:**
+
 ```bash
+git clone https://github.com/autopilotaitech/BookDepthIQ-Vest-Scanner.git
+cd BookDepthIQ-Vest-Scanner
 npm install
 npm run build        # creates dist/ — load it with "Load unpacked"
 ```
 
-1. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, pick `dist`.
-2. Click the toolbar icon. The scanner opens in its own window and scans while it is open.
+## Quick start
+
+1. Leave the window on **1 min (scalp)** and click **Backfill last 24 h** once, so RVOL and the
+   hourly heat map have a baseline straight away.
+2. Tick **hide chop** to see only markets worth a look, and **alert on breakout / trend** to be
+   told when one starts moving.
+3. Click a row to open that market on Vest (or trade it in
+   [BookDepthIQ-Vest](https://github.com/autopilotaitech/BookDepthIQ-Vest)).
 
 ## What you see
 
@@ -79,6 +104,11 @@ code (`src/vest/`, `src/book/stats.ts`) comes from BookDepthIQ-Vest.
 npm test             # metrics, score, sessions, hourly history
 npm run typecheck
 ```
+
+## Contributing
+
+Issues and pull requests are welcome. The scanner must stay **read-only** (see `CLAUDE.md`): no
+login, no account endpoints, no orders. `npm test` and `npm run typecheck` must pass.
 
 ## License
 
