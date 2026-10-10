@@ -13,7 +13,7 @@ interface Prefs {
   alertsOn: boolean;
   /** Hide CHOP and DEAD markets. */
   hideChop: boolean;
-  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff' | 'funding';
+  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff';
 }
 const PREFS_KEY = 'scanner.prefs.v3';
 const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp' };
@@ -134,7 +134,7 @@ export function App() {
     .sort((a, b) => {
       const k = prefs.sort;
       const v = (r: Row) =>
-        k === 'funding' ? Math.abs(r.m.funding ?? 0) : k === 'opp' ? r.r.opportunity : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
+        k === 'opp' ? r.r.opportunity : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
       return v(b) - v(a);
     });
 
@@ -211,8 +211,6 @@ export function App() {
               {th('vol', 'Vol ×', prefs.windowMin === 1 ? 'average 15-s range, last 1 min ÷ last 15 min (1.0 = normal)' : prefs.windowMin === 5 ? 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)' : 'average 1-min range, last 15 min ÷ last 60 min (1.0 = normal)')}
               {th('eff', 'Trend', `net move ÷ distance travelled over the last ${prefs.windowMin === 1 ? '2' : prefs.windowMin === 5 ? '15' : '30'} min (100% = straight line, 0% = chop)`)}
               <th title="$/min now ÷ this market's usual $/min for this hour">RVOL</th>
-              {th('funding', 'Funding /yr', "Vest's hourly funding as a yearly rate. + longs pay shorts (longs crowded), − shorts pay longs. Settled hourly. Sort = most extreme first.")}
-              <th title="(long − short open interest) ÷ total, from Vest's /v3/oi. + = more longs open">OI skew</th>
               <th>Session</th>
               {th('usd', '$ / min', 'dollars traded per minute over the window')}
               {th('trades', 'Trades / min', 'prints per minute over the window')}
@@ -230,15 +228,6 @@ export function App() {
                 <tr key={r.m.info.symbol} onClick={() => open(r.m)} title={`open ${r.m.display} on Vest`} className={r.score !== undefined && r.score >= 70 ? 'top' : ''}>
                   <td>
                     <span className="sym">{r.m.display}</span> {r.s.quoted && <span className="quoted" title="the book is moving but nothing traded: market-maker quotes only">QUOTED</span>}
-                    {(() => {
-                      const c = engine.crowdingOf(r.m);
-                      return c.crowded ? (
-                        <span className={`crowd ${c.crowded}`} title={`funding ${c.apr! > 0 ? '+' : ''}${(c.apr! * 100).toFixed(0)}%/yr: ${c.crowded}s are paying${c.oiAgrees ? ', and open interest leans the same way' : ''}. Squeeze risk against the crowd. Starting cut-off ±25%/yr, being tested.`}>
-                          CROWDED {c.crowded.toUpperCase()}
-                          {c.oiAgrees ? ' ✓OI' : ''}
-                        </span>
-                      ) : null;
-                    })()}
                   </td>
                   <td>
                     <span className={`opp ${r.r.opportunity >= 50 ? 's-hi' : r.r.opportunity >= 25 ? 's-mid' : ''}`}>{r.r.state === 'dead' || r.r.state === 'warming' ? '—' : r.r.opportunity}</span>
@@ -252,17 +241,6 @@ export function App() {
                   <td className={r.r.volRatio !== undefined && r.r.volRatio >= 1.5 ? 'hot' : ''}>{r.r.volRatio === undefined ? '—' : `${r.r.volRatio.toFixed(1)}×`}</td>
                   <td>{r.r.eff === undefined ? '—' : `${r.r.eff > 0 ? '▲' : r.r.eff < 0 ? '▼' : ''}${Math.round(Math.abs(r.r.eff) * 100)}%`}</td>
                   <td className={r.r.rvol !== undefined && r.r.rvol >= 1.5 ? 'hot' : ''}>{r.r.rvol === undefined ? '—' : `${r.r.rvol.toFixed(1)}×`}</td>
-                  {(() => {
-                    const c = engine.crowdingOf(r.m);
-                    return (
-                      <>
-                        <td className={c.crowded === 'long' ? 'fund-long' : c.crowded === 'short' ? 'fund-short' : ''} title={r.m.funding === undefined ? '' : `${(r.m.funding * 100).toFixed(4)}%/h · premium ${r.m.premiumBps?.toFixed(1) ?? '—'} bps`}>
-                          {c.apr === undefined ? '—' : `${c.apr > 0 ? '+' : ''}${(c.apr * 100).toFixed(0)}%`}
-                        </td>
-                        <td>{c.oiSkew === undefined ? '—' : `${c.oiSkew > 0 ? '+' : ''}${(c.oiSkew * 100).toFixed(0)}%`}</td>
-                      </>
-                    );
-                  })()}
                   <td>
                     <span className={`chip ${!r.m.session.open ? 'closed' : r.m.session.session === 'regular' || r.m.session.session === 'open' ? 'live' : 'ah'}`}>
                       <i />
@@ -285,7 +263,7 @@ export function App() {
             })}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={16} className="muted empty">
+                <td colSpan={14} className="muted empty">
                   {engine.status === 'starting' ? 'Loading Vest markets…' : 'No markets match this filter right now.'}
                 </td>
               </tr>
@@ -330,7 +308,7 @@ export function App() {
         Read-only: public Vest data, no login, no orders. Click a row to open that market on Vest. Recorded {engine.records.length} regime minutes for tuning{' '}
         <button
           className="ghost"
-          title="copy the recorded minutes as CSV: price, liquidity, vol ×, efficiency, RVOL, breakout, state, funding, premium, OI skew, crowded, and the price change 5/15/60 min later"
+          title="copy the recorded minutes as CSV: price, liquidity, vol ×, efficiency, RVOL, breakout, state, and the price change 5/15/60 min later"
           onClick={() => void navigator.clipboard?.writeText(engine.recordsCsv()).then(() => setToast('Recorded stats copied as CSV'), () => setToast('Copy failed'))}
         >
           Copy as CSV

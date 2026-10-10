@@ -1,0 +1,43 @@
+name: Collect funding
+
+# Vest publishes only the current funding rate and open interest. This records them for every
+# market twice an hour (5 min after and 5 min before each hourly settlement), 24/7, to the
+# `data` branch — no browser needed. GitHub may delay scheduled runs by a few minutes.
+on:
+  schedule:
+    - cron: '5,55 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: collect-funding
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: code
+      - uses: actions/checkout@v4
+        with:
+          ref: data
+          path: store
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Collect
+        run: node code/scripts/collect-funding.mjs store/funding
+      - name: Commit
+        working-directory: store
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add funding
+          git diff --cached --quiet && exit 0
+          git commit -q -m "funding $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3; do git push -q && exit 0; git pull -q --rebase; done
+          exit 1
