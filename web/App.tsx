@@ -3,7 +3,9 @@ import { Engine, type Market } from './engine';
 import type { Category } from '../src/scan/score';
 import { avgPerMin } from '../src/scan/history';
 import type { Summary } from '../src/scan/metrics';
-import { becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
+import { TIMEFRAMES, becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
+import { benchmarkFor, flowDiverges, flowShare, relativeBps } from '../src/scan/relative';
+import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard } from '../src/scan/scorecard';
 
 // Per-viewer settings (window, filter, alerts, sort) in localStorage; guarded, defaults always work.
 interface Prefs {
@@ -13,7 +15,7 @@ interface Prefs {
   alertsOn: boolean;
   /** Hide CHOP and DEAD markets. */
   hideChop: boolean;
-  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff';
+  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff' | 'rs' | 'flow';
 }
 const PREFS_KEY = 'scanner.prefs.v3';
 const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp' };
@@ -57,6 +59,11 @@ interface Row {
   score: number | undefined;
   r: Regime;
   spark: number[];
+  /** Benchmark display symbol and this market's move minus the benchmark's, bps. */
+  bench: string | undefined;
+  rs: number | undefined;
+  /** Aggressive buy − sell share of $ over at least 5 min, −1 … +1. */
+  flow: number | undefined;
 }
 
 function Spark({ data, tone }: { data: number[]; tone: string }) {
@@ -101,10 +108,25 @@ export function App() {
   const now = Date.now();
   engine.updateSessions(now, false);
   const windowMs = prefs.windowMin * 60_000;
+  engine.windowMin = prefs.windowMin; // the scorecard grades calls for the window being viewed
+  const tf = TIMEFRAMES[prefs.windowMin];
+  const barsOf = (m: Market) => m.stats.bars(now, tf.slowBars + tf.fastBars + 5, tf.barMs);
+  const benchBars = new Map<string, ReturnType<typeof barsOf>>();
   const rows: Row[] = [...engine.markets.values()].map((m) => {
     const s = m.stats.summary(now, windowMs);
     const { score, regime: r } = engine.regimeOf(m, now, windowMs);
-    return { m, s, score, r, spark: m.stats.perMinute(now, 60) };
+    // Relative strength over the trend span; flow over ≥ 5 min (Vest's tape is thin, like liquidity).
+    const bench = benchmarkFor(m.display, m.category);
+    let rs: number | undefined;
+    if (bench) {
+      if (!benchBars.has(bench)) {
+        const bm = engine.byDisplay(bench);
+        benchBars.set(bench, bm ? barsOf(bm) : []);
+      }
+      rs = relativeBps(barsOf(m), benchBars.get(bench)!, tf.effBars);
+    }
+    const fs = windowMs >= 5 * 60_000 ? s : m.stats.summary(now, 5 * 60_000);
+    return { m, s, score, r, spark: m.stats.perMinute(now, 60), bench, rs, flow: flowShare(fs.buyUsd, fs.sellUsd) };
   });
 
   // Alerts: a liquid market entering BREAKOUT or TRENDING (10-minute cooldown per market).
@@ -134,7 +156,7 @@ export function App() {
     .sort((a, b) => {
       const k = prefs.sort;
       const v = (r: Row) =>
-        k === 'opp' ? r.r.opportunity : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
+        k === 'opp' ? r.r.opportunity : k === 'rs' ? (r.rs ?? -1e9) : k === 'flow' ? (r.flow ?? -9) : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
       return v(b) - v(a);
     });
 
@@ -211,6 +233,8 @@ export function App() {
               {th('vol', 'Vol ×', prefs.windowMin === 1 ? 'average 15-s range, last 1 min ÷ last 15 min (1.0 = normal)' : prefs.windowMin === 5 ? 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)' : 'average 1-min range, last 15 min ÷ last 60 min (1.0 = normal)')}
               {th('eff', 'Trend', `net move ÷ distance travelled over the last ${prefs.windowMin === 1 ? '2' : prefs.windowMin === 5 ? '15' : '30'} min (100% = straight line, 0% = chop)`)}
               <th title="$/min now ÷ this market's usual $/min for this hour">RVOL</th>
+              {th('rs', 'RS', `relative strength: this market's move minus its benchmark's over the last ${prefs.windowMin === 1 ? '2' : prefs.windowMin === 5 ? '15' : '30'} min, in bps (alts vs BTC, stocks/ETFs vs NQ, index vs ES; ES vs NQ). + = leading. Higher-beta markets run further both ways.`)}
+              {th('flow', 'Flow', 'aggressive buying minus selling as a share of $ traded, over at least the last 5 min. ⚠ = price moving against the flow (e.g. a breakout up on net selling)')}
               <th>Session</th>
               {th('usd', '$ / min', 'dollars traded per minute over the window')}
               {th('trades', 'Trades / min', 'prints per minute over the window')}
@@ -241,6 +265,14 @@ export function App() {
                   <td className={r.r.volRatio !== undefined && r.r.volRatio >= 1.5 ? 'hot' : ''}>{r.r.volRatio === undefined ? '—' : `${r.r.volRatio.toFixed(1)}×`}</td>
                   <td>{r.r.eff === undefined ? '—' : `${r.r.eff > 0 ? '▲' : r.r.eff < 0 ? '▼' : ''}${Math.round(Math.abs(r.r.eff) * 100)}%`}</td>
                   <td className={r.r.rvol !== undefined && r.r.rvol >= 1.5 ? 'hot' : ''}>{r.r.rvol === undefined ? '—' : `${r.r.rvol.toFixed(1)}×`}</td>
+                  <td className={r.rs === undefined ? '' : r.rs > 0 ? 'up' : r.rs < 0 ? 'down' : ''} title={r.bench ? `vs ${r.bench}` : 'no benchmark'}>
+                    {r.rs === undefined ? '—' : `${r.rs > 0 ? '+' : ''}${r.rs.toFixed(0)}`}
+                    {r.bench && <small> {r.bench.replace('-PERP', '')}</small>}
+                  </td>
+                  <td className={r.flow === undefined ? '' : r.flow > 0 ? 'up' : r.flow < 0 ? 'down' : ''}>
+                    {flowDiverges(r.r.dir, r.flow) && <span className="diverge" title="price is moving against the flow">⚠ </span>}
+                    {r.flow === undefined ? '—' : `${r.flow > 0 ? 'buy' : r.flow < 0 ? 'sell' : ''} ${Math.round(Math.abs(r.flow) * 100)}%`}
+                  </td>
                   <td>
                     <span className={`chip ${!r.m.session.open ? 'closed' : r.m.session.session === 'regular' || r.m.session.session === 'open' ? 'live' : 'ah'}`}>
                       <i />
@@ -263,7 +295,7 @@ export function App() {
             })}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={14} className="muted empty">
+                <td colSpan={16} className="muted empty">
                   {engine.status === 'starting' ? 'Loading Vest markets…' : 'No markets match this filter right now.'}
                 </td>
               </tr>
@@ -271,6 +303,56 @@ export function App() {
           </tbody>
         </table>
       </div>
+
+      <section className="hours scorecard">
+        <div className="hourshead">
+          <h2>Scorecard: are the calls any good?</h2>
+          <span className="muted">
+            every entry into BREAKOUT / TRENDING on the {prefs.windowMin}-min window, graded {HORIZONS_MIN.join(' / ')} min later · net of spread + taker fees both ways · recorded while this window is open
+          </span>
+          <span className="spacer" />
+          <button className="ghost" onClick={() => void navigator.clipboard?.writeText(callsCsv(engine.calls)).then(() => setToast('Calls copied as CSV'), () => setToast('Copy failed'))}>
+            Copy calls as CSV
+          </button>
+          <button className="ghost" onClick={() => engine.clearCalls()}>
+            Clear
+          </button>
+        </div>
+        <table className="card">
+          <thead>
+            <tr>
+              <th>Call</th>
+              {HORIZONS_MIN.map((h) => (
+                <th key={h} title="average net bps · share that made money · calls graded">
+                  {h} min later
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {scorecard(engine.calls, prefs.windowMin).map((row) => (
+              <tr key={row.label}>
+                <td>{row.label}</td>
+                {row.grades.map((g, i) => (
+                  <td key={i} className={g.n < MIN_TRUSTED ? 'faint' : ''} title={g.n < MIN_TRUSTED ? `only ${g.n} graded: under ${MIN_TRUSTED}, too few to trust` : ''}>
+                    {g.n === 0 ? (
+                      '—'
+                    ) : (
+                      <>
+                        <span className={g.avgBps! > 0 ? 'up' : 'down'}>
+                          {g.avgBps! > 0 ? '+' : ''}
+                          {g.avgBps!.toFixed(1)} bps
+                        </span>{' '}
+                        · {Math.round(g.winRate! * 100)}% win · n={g.n}
+                      </>
+                    )}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
 
       <section className="hours">
         <div className="hourshead">

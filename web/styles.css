@@ -84,3 +84,14 @@ footer { padding: 10px 14px 16px; font-size: 12px; }
 .opp { display: inline-block; min-width: 34px; text-align: center; border-radius: 4px; font-weight: 700; color: var(--faint); }
 td.hot { color: var(--warn); font-weight: 700; }
 
+
+/* v0.5 scorecard, RS, flow */
+td.up, .up { color: var(--live); }
+td.down, .down { color: var(--dead); }
+td small { color: var(--faint); font-size: 10px; }
+.diverge { color: var(--warn); font-weight: 700; }
+table.card { min-width: 0; max-width: 760px; }
+table.card th { position: static; }
+table.card tbody tr { cursor: default; }
+td.faint { color: var(--faint); }
+td.faint .up, td.faint .down { opacity: 0.6; }

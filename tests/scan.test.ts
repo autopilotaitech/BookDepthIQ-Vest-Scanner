@@ -52,9 +52,9 @@ describe('score', () => {
   });
 
   it('NQ-like market scores high; idle quoted market is capped', () => {
-    const nq = liquidityScore({ usdPerMin: 1.6e6, tradesPerMin: 16, spreadBps: 0.32, top5Usd: 555e3, rangeBps: 8, updPerSec: 3.9, quoted: false, ladder: 0.9 });
+    const nq = liquidityScore({ usdPerMin: 1.6e6, tradesPerMin: 16, spreadBps: 0.32, top5Usd: 555e3, rangeBps: 8, updPerSec: 3.9, quoted: false, ladder: 0.9, buyUsd: 0, sellUsd: 0 });
     expect(nq).toBeGreaterThanOrEqual(85);
-    const idle = liquidityScore({ usdPerMin: 0, tradesPerMin: 0, spreadBps: 4.8, top5Usd: 210e3, rangeBps: 0, updPerSec: 0.7, quoted: true, ladder: 1 });
+    const idle = liquidityScore({ usdPerMin: 0, tradesPerMin: 0, spreadBps: 4.8, top5Usd: 210e3, rangeBps: 0, updPerSec: 0.7, quoted: true, ladder: 1, buyUsd: 0, sellUsd: 0 });
     expect(idle).toBeLessThanOrEqual(QUOTED_CAP);
   });
 

@@ -82,11 +82,21 @@ one-minute read would call good markets dead between prints.
 | **Vol ×** | recent average bar range ÷ the longer baseline (see the table above). 1.0 = normal. |
 | **Trend** | net move ÷ distance travelled (100% = straight line, 0% = chop), with direction. |
 | **RVOL** | $/min now ÷ this market's usual $/min for this hour (needs 30 recorded minutes for the hour; **Backfill last 24 h** gives it at once). |
+| **RS** | Relative strength: this market's move minus its benchmark's over the trend span, in bps. Alts vs BTC, stocks and ETFs vs NQ, index vs ES (ES vs NQ). **+** = leading. Higher-beta markets run further both ways. |
+| **Flow** | Aggressive buying minus selling, as a share of $ traded over at least the last 5 minutes. **⚠** = price moving against the flow, e.g. a breakout up on net selling. |
 
 - **Hide chop** removes CHOP and DEAD rows. **Alerts** fire when a liquid market enters
   BREAKOUT or TRENDING.
 - The cut-offs are starting values. The scanner records these numbers every minute for the top 8
   markets (2 days); **Copy as CSV** in the footer exports them so the cut-offs can be tuned.
+
+**Scorecard: are the calls any good?** Every time a market enters BREAKOUT or TRENDING with a
+direction, the scanner opens a call at that price and grades it 5, 15 and 30 minutes later: the
+move in the call's direction, **minus the cost of a taker round trip** (the spread plus Vest's taker
+fee each way). It shows the average net bps, the share that made money and how many were graded,
+per state, for the window you are viewing. Under 30 graded calls the row is greyed out: too few to
+trust. Calls are recorded only while the scanner window is open (a horizon read more than 2
+minutes late is dropped, not guessed), kept 14 days, and **Copy calls as CSV** exports them.
 
 **Funding history** is collected 24/7 by a GitHub Action (no browser needed): every hour at :05
 and :55 UTC it saves every market's funding rate, mark, index and long/short open interest to the

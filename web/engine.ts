@@ -11,7 +11,8 @@ import { MarketStats } from '../src/scan/metrics';
 import { categoryOf, sessionAt, type Category, type SessionNow } from '../src/scan/score';
 import { BASELINE_MIN_MINUTES, addHistory, addMinute, avgPerMin, hourIn, type HourMap } from '../src/scan/history';
 import { liquidityScore } from '../src/scan/score';
-import { TIMEFRAMES, regime, type Regime } from '../src/scan/regime';
+import { TIMEFRAMES, becameActionable, regime, type Regime, type RegimeState } from '../src/scan/regime';
+import { CALL_COOLDOWN_MS, gradeCall, openCall, type Call } from '../src/scan/scorecard';
 
 export interface Market {
   info: SymbolInfo;
@@ -27,6 +28,8 @@ export const HISTORY_TZ = 'America/Chicago';
 const RECORD_KEY = 'scanner.regime.v1';
 const RECORD_MARKETS = 8; // top markets by 24 h volume
 const RECORD_KEEP_MS = 2 * 24 * 3600_000;
+const CALLS_KEY = 'scanner.calls.v1';
+const CALLS_KEEP_MS = 14 * 24 * 3600_000;
 
 /** One recorded minute of regime numbers, for tuning the thresholds later. */
 export interface RegimeRecord {
@@ -50,6 +53,13 @@ export class Engine {
   hours: HourMap = loadHours();
   records: RegimeRecord[] = loadRecords();
   backfilling = '';
+  /** Scanner window the user is viewing; calls are opened and graded for this window. */
+  windowMin: 1 | 5 | 15 = 1;
+  /** Graded BREAKOUT / TRENDING calls (scorecard), 14 days. */
+  calls: Call[] = loadCalls();
+  private callStates = new Map<string, RegimeState>();
+  private callWindow = 0;
+  private lastCallAt = new Map<string, number>();
   private table: SymbolTable | null = null;
   private sock: VestMarketSocket | null = null;
   private hoursAsset = new Map<number, MarketHoursAsset>();
@@ -107,7 +117,7 @@ export class Engine {
         this.changed();
       },
       onTrade: (sym, msg) => {
-        this.markets.get(sym)?.stats.addTrade(msg.data.time, Number(msg.data.price), Number(msg.data.qty));
+        this.markets.get(sym)?.stats.addTrade(msg.data.time, Number(msg.data.price), Number(msg.data.qty), msg.data.side);
         this.changed();
       },
     });
@@ -144,7 +154,68 @@ export class Engine {
     }
     this.lastMinute = minute;
     for (const m of this.markets.values()) m.stats.prune(now);
+    this.trackCalls(now);
     this.changed();
+  }
+
+  /**
+   * Scorecard: open a call when a market ENTERS BREAKOUT or TRENDING with a direction (same edge
+   * as the alerts), then grade each call 5/15/30 min later, net of spread + taker fees.
+   */
+  private trackCalls(now: number): void {
+    let dirty = false;
+    const byDisplay = new Map([...this.markets.values()].map((m) => [m.display, m]));
+    for (const c of this.calls) {
+      if (c.net.every((x) => x !== undefined)) continue;
+      if (gradeCall(c, now, byDisplay.get(c.sym)?.stats.lastPrice())) dirty = true;
+    }
+    if (this.callWindow !== this.windowMin) {
+      // Window changed: states under the old window must not count as "entered".
+      this.callStates.clear();
+      this.callWindow = this.windowMin;
+    }
+    if (this.status === 'live' && this.warming === 0) {
+      const windowMs = this.windowMin * 60_000;
+      for (const m of this.markets.values()) {
+        if (!m.session.open) continue;
+        const { regime: r } = this.regimeOf(m, now, windowMs);
+        const prev = this.callStates.get(m.display);
+        this.callStates.set(m.display, r.state);
+        if (!becameActionable(prev, r.state) || r.dir === 0) continue;
+        const key = `${m.display}:${this.windowMin}`;
+        if (now - (this.lastCallAt.get(key) ?? 0) < CALL_COOLDOWN_MS) continue;
+        const price = m.stats.lastPrice();
+        const spread = m.stats.summary(now, 5 * 60_000).spreadBps;
+        if (!(price! > 0) || spread === undefined) continue;
+        this.lastCallAt.set(key, now);
+        this.calls.push(openCall(now, m.display, this.windowMin, r.state as 'breakout' | 'trending', r.dir, price!, spread, Number(m.info.takerFee ?? 0) || 0));
+        dirty = true;
+      }
+    }
+    if (!dirty) return;
+    const cut = now - CALLS_KEEP_MS;
+    while (this.calls.length && this.calls[0]!.t < cut) this.calls.shift();
+    try {
+      localStorage.setItem(CALLS_KEY, JSON.stringify(this.calls));
+    } catch {
+      /* storage full or unavailable: keep in memory */
+    }
+  }
+
+  clearCalls(): void {
+    this.calls = [];
+    try {
+      localStorage.removeItem(CALLS_KEY);
+    } catch {
+      /* nothing stored */
+    }
+    this.changed();
+  }
+
+  /** Market by display symbol (e.g. a benchmark), resolved through the symbol table. */
+  byDisplay(name: string): Market | undefined {
+    const info = this.table?.resolve(name);
+    return info ? this.markets.get(info.symbol) : undefined;
   }
 
   private async refresh24h(): Promise<void> {
@@ -194,7 +265,7 @@ export class Engine {
         try {
           const rows = await fetchTradesBefore(sym, now, 1000);
           const st = this.markets.get(sym)!.stats;
-          for (const r of rows) if (r.time >= now - 60 * 60_000) st.addTrade(r.time, Number(r.price), Number(r.qty));
+          for (const r of rows) if (r.time >= now - 60 * 60_000) st.addTrade(r.time, Number(r.price), Number(r.qty), r.side);
         } catch {
           /* skip: live trades fill in */
         }
@@ -312,6 +383,15 @@ function loadHours(): HourMap {
     return raw ? (JSON.parse(raw) as HourMap) : {};
   } catch {
     return {};
+  }
+}
+
+function loadCalls(): Call[] {
+  try {
+    const raw = localStorage.getItem(CALLS_KEY);
+    return raw ? (JSON.parse(raw) as Call[]) : [];
+  } catch {
+    return [];
   }
 }
 

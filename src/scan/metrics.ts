@@ -19,12 +19,17 @@ export interface Summary {
   quoted: boolean;
   /** Share of resting sizes that are whole multiples of one unit (market-maker ladder), 0–1. */
   ladder: number;
+  /** $ taken by aggressive buyers / sellers over the window (trades with a known side). */
+  buyUsd: number;
+  sellUsd: number;
 }
 
 interface TradePt {
   t: number;
   price: number;
   usd: number;
+  /** Aggressor: +1 buyer, −1 seller, 0 unknown. */
+  side: -1 | 0 | 1;
 }
 interface DepthPt {
   t: number;
@@ -89,9 +94,9 @@ export class MarketStats {
     return out;
   }
 
-  addTrade(t: number, price: number, qty: number): void {
+  addTrade(t: number, price: number, qty: number, side?: 'buy' | 'sell'): void {
     if (!(price > 0) || !(qty > 0)) return;
-    this.trades.push({ t, price, usd: price * qty });
+    this.trades.push({ t, price, usd: price * qty, side: side === 'buy' ? 1 : side === 'sell' ? -1 : 0 });
     this.mark(t, price);
     // trades usually arrive in order; history backfill may not, so keep them sorted
     const n = this.trades.length;
@@ -142,9 +147,13 @@ export class MarketStats {
     let hi = -Infinity;
     let lo = Infinity;
     let last = 0;
+    let buyUsd = 0;
+    let sellUsd = 0;
     for (const tr of this.trades) {
       if (tr.t < from || tr.t > now) continue;
       usd += tr.usd;
+      if (tr.side > 0) buyUsd += tr.usd;
+      else if (tr.side < 0) sellUsd += tr.usd;
       n++;
       hi = Math.max(hi, tr.price);
       lo = Math.min(lo, tr.price);
@@ -164,6 +173,8 @@ export class MarketStats {
       updPerSec,
       quoted: n === 0 && upd > 0,
       ladder: this.ladder,
+      buyUsd,
+      sellUsd,
     };
   }
 
