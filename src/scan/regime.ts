@@ -42,6 +42,9 @@ export const REGIME = {
   effTrend: 0.5,
   effChop: 0.3,
   rvolHot: 1.5,
+  /** Range tightened to this fraction of normal or less, while trading is at least usual → COILING. */
+  volCoil: 0.6,
+  rvolCoil: 1.0,
   minLiquidity: 40, // liquidity score below this → DEAD (can't fill it)
 } as const;
 
@@ -83,7 +86,7 @@ export function breakout(bars: Bar[], fast: number, slow: number): -1 | 0 | 1 {
   return 0;
 }
 
-export type RegimeState = 'breakout' | 'trending' | 'expanding' | 'chop' | 'quiet' | 'dead' | 'warming';
+export type RegimeState = 'breakout' | 'trending' | 'expanding' | 'coiling' | 'chop' | 'quiet' | 'dead' | 'warming';
 
 export interface Regime {
   state: RegimeState;
@@ -113,6 +116,8 @@ export function regime(bars: Bar[], liquidity: number | undefined, usdPerMin: nu
   else if (bo !== 0 && volRatio >= REGIME.volExpanding && absEff >= REGIME.effTrend && (rvol === undefined || rvol >= REGIME.rvolHot)) state = 'breakout';
   else if (absEff >= REGIME.effTrend && volRatio >= REGIME.volTrending) state = 'trending';
   else if (volRatio >= REGIME.volExpanding) state = 'expanding';
+  // Range squeezed but trading hasn't dried up: a watch-list name BEFORE it breaks (needs RVOL).
+  else if (volRatio <= REGIME.volCoil && rvol !== undefined && rvol >= REGIME.rvolCoil) state = 'coiling';
   else if (absEff < REGIME.effChop) state = 'chop';
   else state = 'quiet';
 

@@ -95,3 +95,8 @@ table.card th { position: static; }
 table.card tbody tr { cursor: default; }
 td.faint { color: var(--faint); }
 td.faint .up, td.faint .down { opacity: 0.6; }
+
+/* v0.6 coiling, size check */
+.st-coiling { background: rgba(192, 132, 252, 0.14); color: var(--accent); }
+.coilrate { margin: 8px 0 0; font-size: 12px; }
+.coilrate.faint { color: var(--faint); }

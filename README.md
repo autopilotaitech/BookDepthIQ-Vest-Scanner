@@ -48,8 +48,9 @@ npm run build        # creates dist/ — load it with "Load unpacked"
    hourly heat map have a baseline straight away.
 2. Tick **hide chop** to see only markets worth a look, and **alert on breakout / trend** to be
    told when one starts moving.
-3. Click a row to open that market on Vest (or trade it in
-   [BookDepthIQ-Vest](https://github.com/autopilotaitech/BookDepthIQ-Vest)).
+3. Click a row to open that market on Vest. If
+   [BookDepthIQ-Vest](https://github.com/autopilotaitech/BookDepthIQ-Vest) (v1.4+) is installed,
+   its panel switches to the same market.
 
 ## What you see
 
@@ -59,6 +60,7 @@ npm run build        # creates dist/ — load it with "Load unpacked"
 | **$ / min**, **Trades / min** | Real trading over the window (1, 5 or 15 min). |
 | **Spread bps** | Median spread in basis points of mid: your cost to cross. |
 | **Top-5 depth** | Median $ resting in the top 5 levels (smaller side): size you can trade without walking the book. |
+| **Your size** | At the **size $** you set (notional): a typical 1-minute move (1-min ATR) in $ / a taker round trip (spread + fee each way) in $. Green = a minute covers ≥ 3× the cost, amber ≥ 1.5×, red below. **⚠** = your size is bigger than the top 5 levels, so a market order walks the book. |
 | **Last 60 min** | $ traded per minute, as a sparkline. |
 | **24 h vol** | Vest's 24-hour volume. |
 | **Score** | 0–100: $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move (range ÷ spread) 10%, each on a log scale. Markets with no prints are capped at 15 and tagged **QUOTED**. ≥ 70 green, 40–69 amber. |
@@ -78,7 +80,7 @@ one-minute read would call good markets dead between prints.
 | Column | Meaning |
 |---|---|
 | **Opportunity** | 0–100: liquidity × volatility expansion × clean direction. The default sort. |
-| **State** | **▲/▼ BREAKOUT** (beyond its 60-min high/low, vol ≥ 1.5×, clean move) and **TRENDING** (efficiency ≥ 0.5, vol ≥ 1.2×) are the trades; **EXPANDING** (vol ≥ 1.5×, no direction yet) is a watch; **CHOP** (efficiency < 0.3) and **DEAD** (liquidity < 40) are skips. |
+| **State** | **▲/▼ BREAKOUT** (beyond its 60-min high/low, vol ≥ 1.5×, clean move) and **TRENDING** (efficiency ≥ 0.5, vol ≥ 1.2×) are the trades; **EXPANDING** (vol ≥ 1.5×, no direction yet) and **COILING** (range squeezed to ≤ 0.6× normal while trading is at least usual for the hour; needs RVOL) are watches; **CHOP** (efficiency < 0.3) and **DEAD** (liquidity < 40) are skips. |
 | **Vol ×** | recent average bar range ÷ the longer baseline (see the table above). 1.0 = normal. |
 | **Trend** | net move ÷ distance travelled (100% = straight line, 0% = chop), with direction. |
 | **RVOL** | $/min now ÷ this market's usual $/min for this hour (needs 30 recorded minutes for the hour; **Backfill last 24 h** gives it at once). |
@@ -97,6 +99,9 @@ fee each way). It shows the average net bps, the share that made money and how m
 per state, for the window you are viewing. Under 30 graded calls the row is greyed out: too few to
 trust. Calls are recorded only while the scanner window is open (a horizon read more than 2
 minutes late is dropped, not guessed), kept 14 days, and **Copy calls as CSV** exports them.
+COILING has no direction, so it is graded by whether the market started moving (BREAKOUT,
+TRENDING or EXPANDING) within 30 minutes, next to QUIET markets graded the same way as a
+control: COILING only means something if it beats QUIET.
 
 **Funding history** is collected 24/7 by a GitHub Action (no browser needed): every hour at :05
 and :55 UTC it saves every market's funding rate, mark, index and long/short open interest to the
@@ -104,7 +109,9 @@ and :55 UTC it saves every market's funding rate, mark, index and long/short ope
 not publish funding history, so this builds it. See `scripts/collect-funding.mjs`.
 
 - **Filter** by index, crypto, stocks, ETFs, commodities or FX. **Sort** by any column.
-- **Click a row** to open that market on Vest.
+- **Click a row** to open that market on Vest (one reused tab). The link carries a `#bdiq-switch`
+  marker that BookDepthIQ-Vest v1.4+ reads to switch its panel to the same market; it only ever
+  switches the instrument.
 - **Liquid by hour (Chicago):** average $ per minute per hour of the day for the top 12 markets.
   It builds while the window is open; **Backfill last 24 h** fills it from Vest's trade history.
 

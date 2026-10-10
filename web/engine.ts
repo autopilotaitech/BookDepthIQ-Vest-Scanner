@@ -12,7 +12,7 @@ import { categoryOf, sessionAt, type Category, type SessionNow } from '../src/sc
 import { BASELINE_MIN_MINUTES, addHistory, addMinute, avgPerMin, hourIn, type HourMap } from '../src/scan/history';
 import { liquidityScore } from '../src/scan/score';
 import { TIMEFRAMES, becameActionable, regime, type Regime, type RegimeState } from '../src/scan/regime';
-import { CALL_COOLDOWN_MS, gradeCall, openCall, type Call } from '../src/scan/scorecard';
+import { CALL_COOLDOWN_MS, gradeCall, openCall, resolveWatch, type Call, type Watch } from '../src/scan/scorecard';
 
 export interface Market {
   info: SymbolInfo;
@@ -30,6 +30,7 @@ const RECORD_MARKETS = 8; // top markets by 24 h volume
 const RECORD_KEEP_MS = 2 * 24 * 3600_000;
 const CALLS_KEY = 'scanner.calls.v1';
 const CALLS_KEEP_MS = 14 * 24 * 3600_000;
+const WATCH_KEY = 'scanner.watches.v1';
 
 /** One recorded minute of regime numbers, for tuning the thresholds later. */
 export interface RegimeRecord {
@@ -57,6 +58,8 @@ export class Engine {
   windowMin: 1 | 5 | 15 = 1;
   /** Graded BREAKOUT / TRENDING calls (scorecard), 14 days. */
   calls: Call[] = loadCalls();
+  /** COILING entries and a QUIET control group: did each start moving within 30 min? */
+  watches: Watch[] = loadList<Watch>(WATCH_KEY);
   private callStates = new Map<string, RegimeState>();
   private callWindow = 0;
   private lastCallAt = new Map<string, number>();
@@ -181,6 +184,15 @@ export class Engine {
         const { regime: r } = this.regimeOf(m, now, windowMs);
         const prev = this.callStates.get(m.display);
         this.callStates.set(m.display, r.state);
+        for (const w of this.watches) if (w.sym === m.display && w.windowMin === this.windowMin && resolveWatch(w, now, r.state)) dirty = true;
+        if (prev !== undefined && prev !== r.state && (r.state === 'coiling' || r.state === 'quiet')) {
+          const wkey = `${m.display}:${this.windowMin}:${r.state}`;
+          if (now - (this.lastCallAt.get(wkey) ?? 0) >= CALL_COOLDOWN_MS) {
+            this.lastCallAt.set(wkey, now);
+            this.watches.push({ t: now, sym: m.display, windowMin: this.windowMin, from: r.state });
+            dirty = true;
+          }
+        }
         if (!becameActionable(prev, r.state) || r.dir === 0) continue;
         const key = `${m.display}:${this.windowMin}`;
         if (now - (this.lastCallAt.get(key) ?? 0) < CALL_COOLDOWN_MS) continue;
@@ -192,10 +204,14 @@ export class Engine {
         dirty = true;
       }
     }
+    // A watch whose market closed or whose window was switched away expires as "didn't move".
+    for (const w of this.watches) if (resolveWatch(w, now, undefined)) dirty = true;
     if (!dirty) return;
     const cut = now - CALLS_KEEP_MS;
     while (this.calls.length && this.calls[0]!.t < cut) this.calls.shift();
+    while (this.watches.length && this.watches[0]!.t < cut) this.watches.shift();
     try {
+      localStorage.setItem(WATCH_KEY, JSON.stringify(this.watches));
       localStorage.setItem(CALLS_KEY, JSON.stringify(this.calls));
     } catch {
       /* storage full or unavailable: keep in memory */
@@ -204,8 +220,10 @@ export class Engine {
 
   clearCalls(): void {
     this.calls = [];
+    this.watches = [];
     try {
       localStorage.removeItem(CALLS_KEY);
+      localStorage.removeItem(WATCH_KEY);
     } catch {
       /* nothing stored */
     }
@@ -390,6 +408,15 @@ function loadCalls(): Call[] {
   try {
     const raw = localStorage.getItem(CALLS_KEY);
     return raw ? (JSON.parse(raw) as Call[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadList<T>(key: string): T[] {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T[]) : [];
   } catch {
     return [];
   }

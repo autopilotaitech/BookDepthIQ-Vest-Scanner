@@ -77,3 +77,38 @@ export function callsCsv(calls: Call[]): string {
     ...calls.map((c) => `${new Date(c.t).toISOString()},${c.sym},${c.windowMin},${c.state},${c.dir > 0 ? 'long' : 'short'},${c.entry},${c.costBps.toFixed(2)},${c.net.map(f).join(',')}`),
   ].join('\n');
 }
+
+// COILING has no direction, so it is graded differently: did the market start moving (BREAKOUT,
+// TRENDING or EXPANDING) within 30 minutes? QUIET entries are graded the same way as a control:
+// COILING only means something if it moves more often than QUIET does.
+
+export const WATCH_MS = 30 * 60_000;
+export const MOVING_STATES = ['breakout', 'trending', 'expanding'] as const;
+
+export interface Watch {
+  t: number;
+  sym: string;
+  windowMin: number;
+  from: 'coiling' | 'quiet';
+  /** true = moved within 30 min, false = didn't, undefined = still watching. */
+  moved?: boolean;
+}
+
+/** Resolve a watch from the market's state now. Returns true if it changed. */
+export function resolveWatch(w: Watch, now: number, state: string | undefined): boolean {
+  if (w.moved !== undefined) return false;
+  if (now - w.t > WATCH_MS) w.moved = false;
+  else if (state !== undefined && (MOVING_STATES as readonly string[]).includes(state)) w.moved = true;
+  else return false;
+  return true;
+}
+
+export interface WatchRate {
+  n: number;
+  rate: number | undefined;
+}
+
+export function watchRate(watches: Watch[], windowMin: number, from: Watch['from']): WatchRate {
+  const done = watches.filter((w) => w.windowMin === windowMin && w.from === from && w.moved !== undefined);
+  return { n: done.length, rate: done.length ? done.filter((w) => w.moved).length / done.length : undefined };
+}

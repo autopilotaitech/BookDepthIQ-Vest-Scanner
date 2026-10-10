@@ -3,9 +3,10 @@ import { Engine, type Market } from './engine';
 import type { Category } from '../src/scan/score';
 import { avgPerMin } from '../src/scan/history';
 import type { Summary } from '../src/scan/metrics';
-import { TIMEFRAMES, becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
+import { TIMEFRAMES, atr, becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
 import { benchmarkFor, flowDiverges, flowShare, relativeBps } from '../src/scan/relative';
-import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard } from '../src/scan/scorecard';
+import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard, watchRate } from '../src/scan/scorecard';
+import { ROOM_GOOD, ROOM_OK, sizeCheck, type SizeCheck } from '../src/scan/size';
 
 // Per-viewer settings (window, filter, alerts, sort) in localStorage; guarded, defaults always work.
 interface Prefs {
@@ -15,17 +16,20 @@ interface Prefs {
   alertsOn: boolean;
   /** Hide CHOP and DEAD markets. */
   hideChop: boolean;
-  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff' | 'rs' | 'flow';
+  sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff' | 'rs' | 'flow' | 'room';
+  /** Your trade size in $ notional, for the size check. */
+  sizeUsd: number;
 }
 const PREFS_KEY = 'scanner.prefs.v3';
-const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp' };
+const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp', sizeUsd: 5000 };
 
-const STATE_LABEL: Record<RegimeState, string> = { breakout: 'BREAKOUT', trending: 'TRENDING', expanding: 'EXPANDING', chop: 'CHOP', quiet: 'QUIET', dead: 'DEAD', warming: 'WARMING' };
+const STATE_LABEL: Record<RegimeState, string> = { breakout: 'BREAKOUT', trending: 'TRENDING', expanding: 'EXPANDING', coiling: 'COILING', chop: 'CHOP', quiet: 'QUIET', dead: 'DEAD', warming: 'WARMING' };
 const STATE_TITLE: Record<RegimeState, string> = {
   breakout: 'beyond its recent high/low (15 min on the 1-min window, 60 min otherwise) with volatility ≥ 1.5× and a clean move: the setup you want',
   trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×',
   expanding: 'volatility ≥ 1.5× but no clean direction yet: watch',
   chop: 'moving back and forth (efficiency < 0.3): skip',
+  coiling: 'range squeezed to ≤ 0.6× normal while trading is at least usual for the hour (needs RVOL): watch for the break',
   quiet: 'liquid but calm',
   dead: 'not liquid enough to fill (score < 40) or quoted only',
   warming: 'collecting at least 20 one-minute bars',
@@ -64,6 +68,7 @@ interface Row {
   rs: number | undefined;
   /** Aggressive buy − sell share of $ over at least 5 min, −1 … +1. */
   flow: number | undefined;
+  size: SizeCheck | undefined;
 }
 
 function Spark({ data, tone }: { data: number[]; tone: string }) {
@@ -126,7 +131,9 @@ export function App() {
       rs = relativeBps(barsOf(m), benchBars.get(bench)!, tf.effBars);
     }
     const fs = windowMs >= 5 * 60_000 ? s : m.stats.summary(now, 5 * 60_000);
-    return { m, s, score, r, spark: m.stats.perMinute(now, 60), bench, rs, flow: flowShare(fs.buyUsd, fs.sellUsd) };
+    // Size check: a typical 1-minute move (ATR of 1-min bars) and a round trip, at your size.
+    const size = sizeCheck(prefs.sizeUsd, m.stats.lastPrice(), atr(m.stats.bars(now, 20, 60_000), 15), fs.spreadBps, Number(m.info.takerFee ?? 0) || 0, fs.top5Usd);
+    return { m, s, score, r, spark: m.stats.perMinute(now, 60), bench, rs, flow: flowShare(fs.buyUsd, fs.sellUsd), size };
   });
 
   // Alerts: a liquid market entering BREAKOUT or TRENDING (10-minute cooldown per market).
@@ -156,15 +163,30 @@ export function App() {
     .sort((a, b) => {
       const k = prefs.sort;
       const v = (r: Row) =>
-        k === 'opp' ? r.r.opportunity : k === 'rs' ? (r.rs ?? -1e9) : k === 'flow' ? (r.flow ?? -9) : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
+        k === 'opp' ? r.r.opportunity : k === 'room' ? (r.size?.ratio ?? -1) : k === 'rs' ? (r.rs ?? -1e9) : k === 'flow' ? (r.flow ?? -9) : k === 'vol' ? (r.r.volRatio ?? -1) : k === 'eff' ? Math.abs(r.r.eff ?? 0) : k === 'score' ? (r.score ?? -1) : k === 'usd' ? r.s.usdPerMin : k === 'trades' ? r.s.tradesPerMin : k === 'spread' ? -(r.s.spreadBps ?? 1e9) : k === 'depth' ? (r.s.top5Usd ?? 0) : r.m.vol24h;
       return v(b) - v(a);
     });
 
-  const open = (m: Market) => {
-    const url = `https://next.vestmarkets.com/trade/${encodeURIComponent(m.display)}`;
-    const chrome = (globalThis as { chrome?: { tabs?: { create(o: { url: string }): void } } }).chrome;
-    if (chrome?.tabs) chrome.tabs.create({ url });
-    else window.open(url, '_blank', 'noopener');
+  // Row click: open the market on Vest, reusing one tab. The #bdiq-switch marker tells the
+  // BookDepthIQ-Vest panel (if installed) to switch to the same market; Vest itself ignores it.
+  const vestTab = useRef<number | undefined>(undefined);
+  const open = async (m: Market) => {
+    const url = `https://next.vestmarkets.com/trade/${encodeURIComponent(m.display)}#bdiq-switch`;
+    type Tab = { id?: number };
+    const chrome = (globalThis as { chrome?: { tabs?: { create(o: { url: string }): Promise<Tab>; update(id: number, o: { url: string; active: boolean }): Promise<Tab> } } }).chrome;
+    if (!chrome?.tabs) {
+      window.open(url, '_blank', 'noopener');
+      return;
+    }
+    if (vestTab.current !== undefined) {
+      try {
+        await chrome.tabs.update(vestTab.current, { url, active: true });
+        return;
+      } catch {
+        vestTab.current = undefined; // closed
+      }
+    }
+    vestTab.current = (await chrome.tabs.create({ url })).id;
   };
 
   const th = (k: Prefs['sort'], label: string, title: string) => (
@@ -204,6 +226,10 @@ export function App() {
         <label title="hide markets that are chopping or too thin to fill">
           <input type="checkbox" checked={prefs.hideChop} onChange={(e) => update({ hideChop: e.target.checked })} /> hide chop
         </label>
+        <label title="your trade size in $ notional (price × units), for the Your size column">
+          size $
+          <input type="number" min={0} step={500} value={prefs.sizeUsd} onChange={(e) => update({ sizeUsd: Math.max(0, Number(e.target.value) || 0) })} />
+        </label>
         <label title="notify when a liquid market enters BREAKOUT or TRENDING">
           <input type="checkbox" checked={prefs.alertsOn} onChange={(e) => update({ alertsOn: e.target.checked })} /> alert on breakout / trend
         </label>
@@ -240,6 +266,7 @@ export function App() {
               {th('trades', 'Trades / min', 'prints per minute over the window')}
               {th('spread', 'Spread bps', 'median spread, basis points of mid (lower is cheaper)')}
               {th('depth', 'Top-5 depth', 'median of the smaller side of the top 5 levels, in $')}
+              {th('room', 'Your size', `at $${prefs.sizeUsd.toLocaleString()}: a typical 1-min move (1-min ATR) in $ / a taker round trip (spread + fee each way) in $. Green = a minute covers ≥ ${ROOM_GOOD}× the cost, amber ≥ ${ROOM_OK}×. ⚠ = your size is bigger than the top 5 levels: a market order walks the book`)}
               <th title="$ traded per minute, last 60 minutes">Last 60 min</th>
               {th('vol24h', '24 h vol', "Vest's 24 h volume")}
               {th('score', 'Liquidity', 'liquidity score 0–100 over at least the last 5 min (steady fill check): $/min 40%, trades/min 20%, cost 20%, depth 10%, room to move 10%')}
@@ -249,7 +276,7 @@ export function App() {
             {visible.map((r) => {
               const tone = r.score === undefined ? 'var(--faint)' : r.score >= 70 ? 'var(--live)' : r.score >= 40 ? 'var(--warn)' : 'var(--dead)';
               return (
-                <tr key={r.m.info.symbol} onClick={() => open(r.m)} title={`open ${r.m.display} on Vest`} className={r.score !== undefined && r.score >= 70 ? 'top' : ''}>
+                <tr key={r.m.info.symbol} onClick={() => void open(r.m)} title={`open ${r.m.display} on Vest (and switch the BookDepthIQ-Vest panel to it)`} className={r.score !== undefined && r.score >= 70 ? 'top' : ''}>
                   <td>
                     <span className="sym">{r.m.display}</span> {r.s.quoted && <span className="quoted" title="the book is moving but nothing traded: market-maker quotes only">QUOTED</span>}
                   </td>
@@ -283,6 +310,10 @@ export function App() {
                   <td>{r.s.tradesPerMin.toFixed(r.s.tradesPerMin >= 10 ? 0 : 1)}</td>
                   <td>{r.s.spreadBps === undefined ? '—' : r.s.spreadBps.toFixed(2)}</td>
                   <td>{fmtUsd(r.s.top5Usd)}</td>
+                  <td className={r.size === undefined ? '' : r.size.ratio >= ROOM_GOOD ? 'up' : r.size.ratio >= ROOM_OK ? 'hot' : 'down'}>
+                    {r.size?.walks && <span className="diverge" title="bigger than the top 5 levels: walks the book">⚠ </span>}
+                    {r.size === undefined ? '—' : `$${r.size.moveUsd.toFixed(2)} / $${r.size.costUsd.toFixed(2)}`}
+                  </td>
                   <td>
                     <Spark data={r.spark} tone={tone} />
                   </td>
@@ -295,7 +326,7 @@ export function App() {
             })}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={16} className="muted empty">
+                <td colSpan={17} className="muted empty">
                   {engine.status === 'starting' ? 'Loading Vest markets…' : 'No markets match this filter right now.'}
                 </td>
               </tr>
@@ -352,6 +383,16 @@ export function App() {
             ))}
           </tbody>
         </table>
+        {(() => {
+          const coil = watchRate(engine.watches, prefs.windowMin, 'coiling');
+          const quiet = watchRate(engine.watches, prefs.windowMin, 'quiet');
+          const pct = (w: typeof coil) => (w.rate === undefined ? '—' : `${Math.round(w.rate * 100)}%`);
+          return (
+            <p className={`coilrate ${coil.n < MIN_TRUSTED || quiet.n < MIN_TRUSTED ? 'faint' : ''}`} title="share that entered BREAKOUT, TRENDING or EXPANDING within 30 minutes. COILING only means something if it beats QUIET.">
+              Started moving within 30 min: <b>COILING {pct(coil)}</b> (n={coil.n}) vs QUIET {pct(quiet)} (n={quiet.n}, the control)
+            </p>
+          );
+        })()}
       </section>
 
       <section className="hours">
