@@ -202,3 +202,34 @@ describe('1-minute scalping window', () => {
     expect(['breakout', 'trending']).toContain(r.state);
   });
 });
+
+import { CROWDING, crowding, forwardReturns, oiSkew } from '../src/scan/crowding.js';
+
+describe('funding crowding', () => {
+  it('APR, crowded side and open-interest agreement', () => {
+    const btc = crowding(0.0000946, oiSkew(80, 66)); // +0.00946%/h ≈ +83%/yr
+    expect(btc.apr!).toBeCloseTo(0.0000946 * 8760);
+    expect(btc.crowded).toBe('long');
+    expect(btc.oiSkew!).toBeCloseTo(14 / 146);
+    expect(btc.oiAgrees).toBe(false); // skew under the 0.2 lean
+    expect(crowding(0.0000946, 0.3).oiAgrees).toBe(true);
+    expect(crowding(-0.0001, -0.5)).toMatchObject({ crowded: 'short', oiAgrees: true });
+    expect(crowding(-0.0000024, 0.5).crowded).toBeUndefined(); // NQ-like ≈ −2%/yr: not crowded
+    expect(crowding(undefined, undefined)).toMatchObject({ apr: undefined, crowded: undefined });
+    expect(CROWDING.aprCrowded).toBe(0.25);
+  });
+
+  it('forward returns from later rows of the same market', () => {
+    const rows = [
+      { t: 0, sym: 'A', price: 100 },
+      { t: 5 * 60_000, sym: 'A', price: 101 },
+      { t: 15 * 60_000 + 30_000, sym: 'A', price: 99 },
+      { t: 0, sym: 'B', price: 50 },
+    ];
+    const f = forwardReturns(rows, [5, 15, 60]);
+    expect(f[0]![0]).toBeCloseTo(1);
+    expect(f[0]![1]).toBeCloseTo(-1);
+    expect(f[0]![2]).toBeUndefined();
+    expect(f[3]).toEqual([undefined, undefined, undefined]);
+  });
+});

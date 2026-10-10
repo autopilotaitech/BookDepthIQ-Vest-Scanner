@@ -114,6 +114,13 @@ export class MarketStats {
     this.ladder = ladderScore([...bids, ...asks].map((l) => Number(l[1]))).score;
   }
 
+  /** Latest price seen (trade or book mid), for recording forward returns. */
+  lastPrice(): number | undefined {
+    let best: Bar | undefined;
+    for (const b of this.barMap.values()) if (!best || b.t > best.t) best = b;
+    return best?.c;
+  }
+
   /** Drop data older than what any view needs. */
   prune(now: number): void {
     const cutT = now - KEEP_TRADES_MS;

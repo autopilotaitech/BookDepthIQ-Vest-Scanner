@@ -88,6 +88,17 @@ one-minute read would call good markets dead between prints.
 - The cut-offs are starting values. The scanner records these numbers every minute for the top 8
   markets (2 days); **Copy as CSV** in the footer exports them so the cut-offs can be tuned.
 
+**Funding and crowding** (v0.4). Vest pays funding hourly between longs and shorts:
+- **Funding /yr**: each market's hourly funding as a yearly rate. **+** longs pay shorts (longs
+  crowded), **−** shorts pay longs. Hover for the hourly rate and the mark − index premium.
+- **OI skew**: (long − short open interest) ÷ total, from Vest's `/v3/oi`.
+- **CROWDED LONG / SHORT** tags markets with funding beyond ±25%/yr; **✓OI** means open interest
+  leans the same way. That is squeeze risk against the crowd, a slow (hours) bias rather than a
+  scalp trigger. On NQ/ES funding is tiny (≈ ±2–3%/yr at the time of writing).
+- **Testing it:** the recorder now logs price, funding, premium, OI skew and the crowded tag every
+  minute, and **Copy as CSV** adds the price change 5, 15 and 60 minutes later, so it can be
+  checked whether crowding actually predicted moves before trading on it.
+
 - **Filter** by index, crypto, stocks, ETFs, commodities or FX. **Sort** by any column.
 - **Click a row** to open that market on Vest.
 - **Liquid by hour (Chicago):** average $ per minute per hour of the day for the top 12 markets.

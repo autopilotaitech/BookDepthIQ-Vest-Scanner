@@ -4,7 +4,8 @@
 
 import { buildSymbolTable, type SymbolTable } from '../src/vest/symbols';
 import { VestMarketSocket } from '../src/vest/ws';
-import { fetch24h, fetchExchangeInfo, fetchMarketHours, fetchTradesBefore, type MarketHoursAsset } from '../src/vest/rest';
+import { fetch24h, fetchExchangeInfo, fetchMarketHours, fetchOi, fetchTickersLatest, fetchTradesBefore, type MarketHoursAsset } from '../src/vest/rest';
+import { crowding, forwardReturns, oiSkew, type Crowding } from '../src/scan/crowding';
 import type { SymbolInfo } from '../src/vest/types';
 import { MarketStats } from '../src/scan/metrics';
 import { categoryOf, sessionAt, type Category, type SessionNow } from '../src/scan/score';
@@ -19,6 +20,12 @@ export interface Market {
   stats: MarketStats;
   vol24h: number;
   session: SessionNow;
+  /** Vest's hourly funding rate (fraction); + longs pay shorts. */
+  funding: number | undefined;
+  /** (mark − index) ÷ index, in bps. */
+  premiumBps: number | undefined;
+  /** (long OI − short OI) ÷ total, −1 … +1. */
+  oiSkew: number | undefined;
 }
 
 const HISTORY_KEY = 'scanner.hours.v1';
@@ -37,6 +44,12 @@ export interface RegimeRecord {
   rvol: number | undefined;
   bo: number;
   state: string;
+  /** Added in v0.4 (older rows lack them). */
+  price?: number;
+  funding?: number;
+  premiumBps?: number;
+  oiSkew?: number;
+  crowded?: string;
 }
 
 export class Engine {
@@ -91,6 +104,9 @@ export class Engine {
         stats: new MarketStats(),
         vol24h: 0,
         session: { session: 'unknown', open: true },
+        funding: undefined,
+        premiumBps: undefined,
+        oiSkew: undefined,
       });
     }
     this.sock = new VestMarketSocket({
@@ -111,6 +127,8 @@ export class Engine {
     this.sock.start();
     for (const sym of this.markets.keys()) this.sock.subscribe(sym, ['depth', 'trades']);
     void this.refresh24h();
+    void this.refreshFunding();
+    this.timers.push(setInterval(() => void this.refreshFunding(), 60_000));
     void this.refreshSessions();
     void this.warmUp();
     this.timers.push(setInterval(() => void this.refresh24h(), 5 * 60_000));
@@ -153,6 +171,35 @@ export class Engine {
     } catch {
       /* the table still works on live data */
     }
+  }
+
+  /** Every minute: funding, mark − index premium and open-interest skew for every market. */
+  private async refreshFunding(): Promise<void> {
+    try {
+      const syms = [...this.markets.keys()];
+      for (let i = 0; i < syms.length; i += 40) {
+        for (const t of await fetchTickersLatest(syms.slice(i, i + 40))) {
+          const m = this.markets.get(t.symbol);
+          if (!m) continue;
+          const f = Number(t.oneHrFundingRate);
+          m.funding = Number.isFinite(f) ? f : undefined;
+          const mark = Number(t.markPrice);
+          const idx = Number(t.indexPrice);
+          m.premiumBps = mark > 0 && idx > 0 ? ((mark - idx) / idx) * 1e4 : undefined;
+        }
+      }
+      for (const o of await fetchOi()) {
+        const m = this.markets.get(o.symbol);
+        if (m) m.oiSkew = oiSkew(Number(o.longOi), Number(o.shortOi));
+      }
+      this.changed();
+    } catch {
+      /* funding columns stay as they were */
+    }
+  }
+
+  crowdingOf(m: Market): Crowding {
+    return crowding(m.funding, m.oiSkew);
   }
 
   private async refreshSessions(): Promise<void> {
@@ -255,9 +302,25 @@ export class Engine {
   /** Once a minute: keep the top markets' regime numbers (2 days) so thresholds can be tuned. */
   private recordRegimes(now: number): void {
     const top = [...this.markets.values()].sort((a, b) => b.vol24h - a.vol24h).slice(0, RECORD_MARKETS);
-    for (const m of top) {
+    const crowdedMarkets = [...this.markets.values()].filter((m) => this.crowdingOf(m).crowded && !top.includes(m));
+    for (const m of [...top, ...crowdedMarkets]) {
       const { score, regime: r } = this.regimeOf(m, now, 5 * 60_000);
-      this.records.push({ t: now, sym: m.display, score, vol: r.volRatio, eff: r.eff, rvol: r.rvol, bo: r.breakout, state: r.state });
+      const c = this.crowdingOf(m);
+      this.records.push({
+        t: now,
+        sym: m.display,
+        score,
+        vol: r.volRatio,
+        eff: r.eff,
+        rvol: r.rvol,
+        bo: r.breakout,
+        state: r.state,
+        price: m.stats.lastPrice(),
+        funding: m.funding,
+        premiumBps: m.premiumBps,
+        oiSkew: m.oiSkew,
+        crowded: c.crowded,
+      });
     }
     const cut = now - RECORD_KEEP_MS;
     while (this.records.length && this.records[0]!.t < cut) this.records.shift();
@@ -271,7 +334,14 @@ export class Engine {
   /** The recorded minutes as CSV (for tuning). */
   recordsCsv(): string {
     const f = (v: number | undefined, d = 3) => (v === undefined || !Number.isFinite(v) ? '' : v.toFixed(d));
-    return ['time,market,score,vol_ratio,efficiency,rvol,breakout,state', ...this.records.map((r) => `${new Date(r.t).toISOString()},${r.sym},${r.score ?? ''},${f(r.vol)},${f(r.eff)},${f(r.rvol)},${r.bo},${r.state}`)].join('\n');
+    const fwd = forwardReturns(this.records.map((r) => ({ t: r.t, sym: r.sym, price: r.price })), [5, 15, 60]);
+    return [
+      'time,market,price,score,vol_ratio,efficiency,rvol,breakout,state,funding_per_h,funding_apr,premium_bps,oi_skew,crowded,fwd_5m_pct,fwd_15m_pct,fwd_60m_pct',
+      ...this.records.map(
+        (r, i) =>
+          `${new Date(r.t).toISOString()},${r.sym},${r.price ?? ''},${r.score ?? ''},${f(r.vol)},${f(r.eff)},${f(r.rvol)},${r.bo},${r.state},${f(r.funding, 7)},${r.funding === undefined ? '' : f(r.funding * 8760, 4)},${f(r.premiumBps, 2)},${f(r.oiSkew)},${r.crowded ?? ''},${f(fwd[i]![0], 4)},${f(fwd[i]![1], 4)},${f(fwd[i]![2], 4)}`,
+      ),
+    ].join('\n');
   }
 
   clearHours(): void {

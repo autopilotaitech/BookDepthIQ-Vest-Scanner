@@ -36,6 +36,18 @@ export function fetchRecentTrades(symbol: string): Promise<TradeData[]> {
   return getJson<TradeData[]>(`/v3/trades?symbol=${encodeURIComponent(symbol)}`);
 }
 
+/** GET /v3/ticker/latest — funding (oneHrFundingRate), mark and index per market (seen 2026-10-10). */
+export async function fetchTickersLatest(symbols: string[]): Promise<TickerData[]> {
+  const r = await getJson<{ tickers: TickerData[] }>(`/v3/ticker/latest?symbols=${symbols.map(encodeURIComponent).join(',')}`);
+  return r.tickers ?? [];
+}
+
+/** GET /v3/oi — long and short open interest per market (seen 2026-10-10: {ois:[{symbol,longOi,shortOi}]}). */
+export async function fetchOi(): Promise<Array<{ symbol: string; longOi: string; shortOi: string }>> {
+  const r = await getJson<{ ois: Array<{ symbol: string; longOi: string; shortOi: string }> }>('/v3/oi');
+  return r.ois ?? [];
+}
+
 export interface Ticker24h {
   symbol: string;
   volume: string;
