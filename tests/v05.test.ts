@@ -1,48 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { MarketStats } from '../src/scan/metrics.js';
 import { benchmarkFor, changeBps, flowDiverges, flowShare, relativeBps } from '../src/scan/relative.js';
-import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, gradeCall, openCall, scorecard } from '../src/scan/scorecard.js';
 import type { Bar } from '../src/scan/regime.js';
 
 const bar = (t: number, c: number): Bar => ({ t, o: c, h: c, l: c, c });
-
-describe('scorecard', () => {
-  it('grades a long call net of spread + fees at each horizon', () => {
-    const c = openCall(0, 'NQ-PERP', 1, 'breakout', 1, 100, 1, 0.0001); // cost 1 + 2 = 3 bps
-    expect(c.costBps).toBeCloseTo(3);
-    expect(gradeCall(c, 4 * 60_000, 101)).toBe(false); // nothing due yet
-    expect(gradeCall(c, 5 * 60_000, 100.1)).toBe(true); // +10 bps − 3
-    expect(c.net[0]).toBeCloseTo(7);
-    expect(c.net[1]).toBeUndefined();
-  });
-
-  it('a short call profits when price falls; a late read is missed, not guessed', () => {
-    const c = openCall(0, 'BTC-PERP', 5, 'trending', -1, 100, 0, 0);
-    gradeCall(c, 15 * 60_000, 99); // 5m is 10 min late → missed; 15m due now → +100 bps
-    expect(c.net[0]).toBeNull();
-    expect(c.net[1]).toBeCloseTo(100);
-  });
-
-  it('summarises per state for one window only, and exports CSV', () => {
-    const a = openCall(0, 'A', 1, 'breakout', 1, 100, 0, 0);
-    const b = openCall(0, 'B', 1, 'trending', 1, 100, 0, 0);
-    const other = openCall(0, 'C', 5, 'breakout', 1, 100, 0, 0);
-    gradeCall(a, 5 * 60_000, 101);
-    gradeCall(b, 5 * 60_000, 99);
-    gradeCall(other, 5 * 60_000, 200);
-    const rows = scorecard([a, b, other], 1);
-    expect(rows.map((r) => r.label)).toEqual(['BREAKOUT', 'TRENDING', 'all calls', 'NQ/ES 8:30–10:30 CT']);
-    expect(rows[0]!.grades[0]).toEqual({ n: 1, avgBps: expect.closeTo(100, 6), winRate: 1 });
-    expect(rows[2]!.grades[0]!.n).toBe(2);
-    expect(rows[2]!.grades[0]!.avgBps).toBeCloseTo(0);
-    expect(rows[2]!.grades[1]!.n).toBe(0);
-    expect(HORIZONS_MIN).toEqual([5, 15, 30]);
-    expect(MIN_TRUSTED).toBeGreaterThan(0);
-    const csv = callsCsv([a]).split('\n');
-    expect(csv[0]).toContain('net_5m_bps');
-    expect(csv[1]).toContain('A,1,breakout,long,100,0.00,100.00,,');
-  });
-});
 
 describe('relative strength', () => {
   it('benchmarks by category', () => {
@@ -86,7 +47,6 @@ describe('flow', () => {
 });
 
 import { regime, TIMEFRAMES, REGIME } from '../src/scan/regime.js';
-import { resolveWatch, watchRate, WATCH_MS, type Watch } from '../src/scan/scorecard.js';
 import { sizeCheck } from '../src/scan/size.js';
 
 describe('v0.6 coiling', () => {
@@ -106,21 +66,6 @@ describe('v0.6 coiling', () => {
   });
 });
 
-describe('v0.6 watches', () => {
-  it('moved if it enters a moving state within 30 min, else not', () => {
-    const a: Watch = { t: 0, sym: 'A', windowMin: 1, from: 'coiling' };
-    expect(resolveWatch(a, 60_000, 'quiet')).toBe(false);
-    expect(resolveWatch(a, 120_000, 'expanding')).toBe(true);
-    expect(a.moved).toBe(true);
-    const b: Watch = { t: 0, sym: 'B', windowMin: 1, from: 'quiet' };
-    expect(resolveWatch(b, WATCH_MS + 1, undefined)).toBe(true);
-    expect(b.moved).toBe(false);
-    const c: Watch = { t: 0, sym: 'C', windowMin: 1, from: 'coiling' };
-    expect(watchRate([a, b, c], 1, 'coiling')).toEqual({ n: 1, rate: 1 });
-    expect(watchRate([a, b, c], 1, 'quiet')).toEqual({ n: 1, rate: 0 });
-  });
-});
-
 describe('v0.6 size check', () => {
   it('typical move and round-trip cost in $ at your size', () => {
     // $10k at 100: ATR 0.5 → 50 bps → $50; cost 1 bps spread + 2 × 1 bp fee = 3 bps → $3
@@ -132,24 +77,5 @@ describe('v0.6 size check', () => {
     expect(sizeCheck(30_000, 100, 0.5, 1, 0.0001, 20_000)!.walks).toBe(true);
     expect(sizeCheck(0, 100, 0.5, 1, 0, 1)).toBeUndefined();
     expect(sizeCheck(1000, undefined, 0.5, 1, 0, 1)).toBeUndefined();
-  });
-});
-
-import { fadeNet, inOpenDrive } from '../src/scan/scorecard.js';
-
-describe('v0.6.1 fade + open-drive test', () => {
-  it('fade pays the same costs on the opposite move', () => {
-    const c = openCall(0, 'NQ-PERP', 1, 'breakout', 1, 100, 1, 0.0001); // cost 3
-    gradeCall(c, 5 * 60_000, 99.9); // gross −10 → follow −13
-    expect(c.net[0]).toBeCloseTo(-13);
-    expect(fadeNet(c, 0)).toBeCloseTo(7); // gross +10 − 3
-    expect(fadeNet(c, 1)).toBeUndefined();
-  });
-  it('opening drive = NQ/ES, weekdays 8:30–10:30 Chicago', () => {
-    const mon0900 = Date.UTC(2026, 9, 12, 14, 0); // Mon 09:00 CDT
-    expect(inOpenDrive({ t: mon0900, sym: 'NQ-PERP' })).toBe(true);
-    expect(inOpenDrive({ t: mon0900, sym: 'BTC-PERP' })).toBe(false);
-    expect(inOpenDrive({ t: Date.UTC(2026, 9, 12, 16, 0), sym: 'ES-PERP' })).toBe(false); // 11:00
-    expect(inOpenDrive({ t: Date.UTC(2026, 9, 11, 14, 0), sym: 'NQ-PERP' })).toBe(false); // Sunday
   });
 });

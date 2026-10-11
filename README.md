@@ -46,8 +46,8 @@ npm run build        # creates dist/ — load it with "Load unpacked"
 
 1. Leave the window on **1 min (scalp)** and click **Backfill last 24 h** once, so RVOL and the
    hourly heat map have a baseline straight away.
-2. Tick **hide chop** to see only markets worth a look, and **alert on breakout / trend** to be
-   told when one starts moving.
+2. Tick **hide chop** to see only markets worth a look, and **alert on setups** to be told when a
+   trend + level setup fires (see *Calls* below).
 3. Click a row to open that market on Vest. If
    [BookDepthIQ-Vest](https://github.com/autopilotaitech/BookDepthIQ-Vest) (v1.4+) is installed,
    its panel switches to the same market.
@@ -80,38 +80,43 @@ one-minute read would call good markets dead between prints.
 | Column | Meaning |
 |---|---|
 | **Opportunity** | 0–100: liquidity × volatility expansion × clean direction. The default sort. |
-| **State** | **▲/▼ BREAKOUT** (beyond its 60-min high/low, vol ≥ 1.5×, clean move) and **TRENDING** (efficiency ≥ 0.5, vol ≥ 1.2×) are moves, **not entry signals** (see *What the replay found* below); **EXPANDING** (vol ≥ 1.5×, no direction yet) and **COILING** (range squeezed to ≤ 0.6× normal while trading is at least usual for the hour; needs RVOL) are watches; **CHOP** (efficiency < 0.3) and **DEAD** (liquidity < 40) are skips. |
+| **State** | **▲/▼ BREAKOUT** (beyond its 60-min high/low, vol ≥ 1.5×, clean move) and **TRENDING** (efficiency ≥ 0.5, vol ≥ 1.2×) describe short-term activity, **not entries** (the calls are the setups below); **EXPANDING** (vol ≥ 1.5×, no direction yet) and **COILING** (range squeezed to ≤ 0.6× normal while trading is at least usual for the hour; needs RVOL) are watches; **CHOP** (efficiency < 0.3) and **DEAD** (liquidity < 40) are skips. |
 | **Vol ×** | recent average bar range ÷ the longer baseline (see the table above). 1.0 = normal. |
 | **Trend** | net move ÷ distance travelled (100% = straight line, 0% = chop), with direction. |
 | **RVOL** | $/min now ÷ this market's usual $/min for this hour (needs 30 recorded minutes for the hour; **Backfill last 24 h** gives it at once). |
 | **RS** | Relative strength: this market's move minus its benchmark's over the trend span, in bps. Alts vs BTC, stocks and ETFs vs NQ, index vs ES (ES vs NQ). **+** = leading. Higher-beta markets run further both ways. |
 | **Flow** | Aggressive buying minus selling, as a share of $ traded over at least the last 5 minutes. **⚠** = price moving against the flow, e.g. a breakout up on net selling. |
 
-- **Hide chop** removes CHOP and DEAD rows. **Alerts** fire when a liquid market enters
-  BREAKOUT or TRENDING.
+- **Hide chop** removes CHOP and DEAD rows. **Alerts** fire on setups (below), not on states.
 - The cut-offs are starting values. The scanner records these numbers every minute for the top 8
   markets (2 days); **Copy as CSV** in the footer exports them so the cut-offs can be tuned.
 
-**Scorecard: are the calls any good?** Every time a market enters BREAKOUT or TRENDING with a
-direction, the scanner opens a call at that price and grades it 5, 15 and 30 minutes later: the
-move in the call's direction, **minus the cost of a taker round trip** (the spread plus Vest's taker
-fee each way). It shows the average net bps, the share that made money and how many were graded,
-per state, for the window you are viewing. Under 30 graded calls the row is greyed out: too few to
-trust. Calls are recorded only while the scanner window is open (a horizon read more than 2
-minutes late is dropped, not guessed), kept 14 days, and **Copy calls as CSV** exports them.
-COILING has no direction, so it is graded by whether the market started moving (BREAKOUT,
-TRENDING or EXPANDING) within 30 minutes, next to QUIET markets graded the same way as a
-control: COILING only means something if it beats QUIET.
+**Calls: trend + levels.** A call needs three things, in this order:
 
-**What the replay found (2026-10-11).** `scripts/replay-calls.ts` runs the scanner's own state
-logic over two weeks of public Vest trades (BTC, ETH, SOL, NQ, ES; 26 Sep – 10 Oct) and grades every
-call like the scorecard. Following BREAKOUT / TRENDING calls **lost money after costs** in both weeks,
-on every market and on both windows (about −2 bps per call, ~3,000 calls). Requiring a bigger move
-(2–5× the round-trip cost), at least 5 real trades, or agreeing flow did not fix it, and fading
-calls in general did not pay either. One slice is open: **fading** 1-min calls on NQ/ES during the
-8:30–10:30 Chicago opening drive made +2.2 bps net at 15 minutes (144 calls, t = 1.8: not proven).
-The scorecard now grades every call both ways and has a row for exactly that slice, so live opens
-can confirm or kill it. Until then, treat the states as *where things are moving*, not as trades.
+1. **A higher-timeframe trend:** the 15-minute SuperTrend (the BookDepthIQ-Vest panel's own engine,
+   `src/scan/supertrend.ts`), built from about two days of trades for the 10 most traded markets.
+   No trend means no call, so chop stays silent.
+2. **A level:** the prior-day high/low, today's high/low so far, or today's VWAP. The trading day
+   starts 17:00 Chicago, like CME.
+3. **A 1-minute close** that either **BREAKS** the level in the trend's direction, or **PULLS BACK**
+   to it (within one round-trip cost) and moves away again in the trend's direction.
+
+One call per market per 30 minutes. The **15m trend** and **Setup** columns show them, and
+**alert on setups** notifies you.
+
+**Scorecard: are the calls any good?** Every call is graded 15, 30 and 60 minutes later: the move
+in the call's direction **minus a taker round trip** (spread plus Vest's fee each way), with the
+share that made money and how many were graded. Under 30 graded calls a row is greyed out. Calls
+are recorded only while the scanner window is open, kept 14 days, and **Copy calls as CSV** exports
+them.
+
+**What the replays found.** `scripts/replay-calls.ts` showed the old calls (entering BREAKOUT /
+TRENDING on 15-second bars) **lost about 2 bps per call after costs** over 26 Sep – 10 Oct on BTC,
+ETH, SOL, NQ and ES, with no filter fixing it: they fired on single ticks. They were replaced by the
+setups above. `scripts/replay-setups.ts` runs the setups over the same two weeks on seven markets
+(adding gold and NVDA): far fewer calls, and silent without a trend, but still **−1 to −4 bps
+after costs** at fixed 15–120 minute holds. Treat calls as *where to look*, not as an edge, until
+the scorecard says otherwise.
 
 **Funding history** is collected 24/7 by a GitHub Action (no browser needed): every hour at :05
 and :55 UTC it saves every market's funding rate, mark, index and long/short open interest to the

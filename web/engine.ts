@@ -11,8 +11,10 @@ import { MarketStats } from '../src/scan/metrics';
 import { categoryOf, sessionAt, type Category, type SessionNow } from '../src/scan/score';
 import { BASELINE_MIN_MINUTES, addHistory, addMinute, avgPerMin, hourIn, type HourMap } from '../src/scan/history';
 import { liquidityScore } from '../src/scan/score';
-import { TIMEFRAMES, becameActionable, regime, type Regime, type RegimeState } from '../src/scan/regime';
-import { CALL_COOLDOWN_MS, gradeCall, openCall, resolveWatch, type Call, type Watch } from '../src/scan/scorecard';
+import { TIMEFRAMES, regime, type Regime } from '../src/scan/regime';
+import { gradeCall, openCall, type Call } from '../src/scan/scorecard';
+import { HtfTracker, type Setup } from '../src/scan/setup';
+import { tickSizeOf } from '../src/vest/symbols';
 
 export interface Market {
   info: SymbolInfo;
@@ -28,9 +30,27 @@ export const HISTORY_TZ = 'America/Chicago';
 const RECORD_KEY = 'scanner.regime.v1';
 const RECORD_MARKETS = 8; // top markets by 24 h volume
 const RECORD_KEEP_MS = 2 * 24 * 3600_000;
-const CALLS_KEY = 'scanner.calls.v1';
+const CALLS_KEY = 'scanner.calls.v2'; // v2: trend + level setups (v1 held the old state calls)
 const CALLS_KEEP_MS = 14 * 24 * 3600_000;
-const WATCH_KEY = 'scanner.watches.v1';
+/** Markets given a higher-timeframe tracker: the most traded by 24 h volume. */
+const HTF_MARKETS = 10;
+/** History loaded per tracker: enough for yesterday's full trading day and the 15-min trend. */
+const HTF_HISTORY_MS = 48 * 3600_000;
+const HTF_MAX_PAGES = 120;
+
+/** A setup that fired, for alerts and the table. */
+export interface SetupEvent {
+  sym: string;
+  setup: Setup;
+}
+
+interface LiveTrade {
+  id: string;
+  t: number;
+  price: number;
+  qty: number;
+  side: 'buy' | 'sell';
+}
 
 /** One recorded minute of regime numbers, for tuning the thresholds later. */
 export interface RegimeRecord {
@@ -54,15 +74,17 @@ export class Engine {
   hours: HourMap = loadHours();
   records: RegimeRecord[] = loadRecords();
   backfilling = '';
-  /** Scanner window the user is viewing; calls are opened and graded for this window. */
-  windowMin: 1 | 5 | 15 = 1;
-  /** Graded BREAKOUT / TRENDING calls (scorecard), 14 days. */
+  /** Trend + level calls (scorecard), 14 days. */
   calls: Call[] = loadCalls();
-  /** COILING entries and a QUIET control group: did each start moving within 30 min? */
-  watches: Watch[] = loadList<Watch>(WATCH_KEY);
-  private callStates = new Map<string, RegimeState>();
-  private callWindow = 0;
-  private lastCallAt = new Map<string, number>();
+  /** Higher-timeframe trend + levels per market (top markets only), by wire symbol. */
+  htf = new Map<string, HtfTracker>();
+  /** Setups as they fire (newest last); the panel turns new ones into alerts. */
+  events: SetupEvent[] = [];
+  /** Latest setup per market (display symbol), for the table. */
+  lastSetup = new Map<string, Setup>();
+  /** Live trades held while a market's history is loading, so the tracker sees time order. */
+  private htfBuffer = new Map<string, LiveTrade[]>();
+  private htfLoading = false;
   private table: SymbolTable | null = null;
   private sock: VestMarketSocket | null = null;
   private hoursAsset = new Map<number, MarketHoursAsset>();
@@ -120,7 +142,11 @@ export class Engine {
         this.changed();
       },
       onTrade: (sym, msg) => {
-        this.markets.get(sym)?.stats.addTrade(msg.data.time, Number(msg.data.price), Number(msg.data.qty), msg.data.side);
+        const d = msg.data;
+        this.markets.get(sym)?.stats.addTrade(d.time, Number(d.price), Number(d.qty), d.side);
+        const buf = this.htfBuffer.get(sym);
+        if (buf) buf.push({ id: d.id, t: d.time, price: Number(d.price), qty: Number(d.qty), side: d.side });
+        else this.htf.get(sym)?.addTrade(d.time, Number(d.price), Number(d.qty), d.side);
         this.changed();
       },
     });
@@ -129,7 +155,8 @@ export class Engine {
     void this.refresh24h();
 
     void this.refreshSessions();
-    void this.warmUp();
+    void this.warmUp().then(() => this.loadHtf());
+    this.timers.push(setInterval(() => void this.loadHtf(), 10 * 60_000));
     this.timers.push(setInterval(() => void this.refresh24h(), 5 * 60_000));
     this.timers.push(setInterval(() => void this.refreshSessions(), 5 * 60_000));
     this.timers.push(setInterval(() => this.tick(), 5_000));
@@ -155,63 +182,91 @@ export class Engine {
       saveHours(this.hours);
       this.recordRegimes(now);
     }
+    if (minute > this.lastMinute) this.checkSetups(minute * 60_000);
     this.lastMinute = minute;
     for (const m of this.markets.values()) m.stats.prune(now);
-    this.trackCalls(now);
+    this.gradeCalls(now);
     this.changed();
   }
 
+  /** On each minute close: every tracked market whose trend + level setup fires opens a call. */
+  private checkSetups(minuteEnd: number): void {
+    let added = false;
+    for (const [sym, tr] of this.htf) {
+      const m = this.markets.get(sym);
+      if (!m || !m.session.open) continue;
+      const spread = m.stats.summary(minuteEnd, 5 * 60_000).spreadBps;
+      if (spread === undefined) continue;
+      const fee = Number(m.info.takerFee ?? 0) || 0;
+      const setup = tr.minuteClose(minuteEnd, spread + 2 * fee * 1e4);
+      if (!setup) continue;
+      this.calls.push(openCall(minuteEnd, m.display, setup.kind, setup.level, setup.dir, setup.close, spread, fee));
+      this.events.push({ sym: m.display, setup });
+      if (this.events.length > 50) this.events.shift();
+      this.lastSetup.set(m.display, setup);
+      added = true;
+    }
+    if (added) this.saveCalls();
+  }
+
   /**
-   * Scorecard: open a call when a market ENTERS BREAKOUT or TRENDING with a direction (same edge
-   * as the alerts), then grade each call 5/15/30 min later, net of spread + taker fees.
+   * Load ~2 days of trades into a higher-timeframe tracker for each of the most traded markets
+   * that has none yet. Live trades are buffered meanwhile and replayed after, in time order.
    */
-  private trackCalls(now: number): void {
+  private async loadHtf(): Promise<void> {
+    if (this.htfLoading) return;
+    this.htfLoading = true;
+    try {
+      const top = [...this.markets.values()].filter((m) => m.vol24h > 0).sort((a, b) => b.vol24h - a.vol24h).slice(0, HTF_MARKETS);
+      for (const m of top) {
+        const sym = m.info.symbol;
+        if (this.htf.has(sym)) continue;
+        this.htfBuffer.set(sym, []);
+        const to = Date.now();
+        const from = to - HTF_HISTORY_MS;
+        const rows: LiveTrade[] = [];
+        let end = to;
+        try {
+          for (let page = 0; page < HTF_MAX_PAGES && end > from; page++) {
+            const got = await fetchTradesBefore(sym, end, 1000);
+            if (!got.length) break;
+            for (const r of got) rows.push({ id: r.id, t: r.time, price: Number(r.price), qty: Number(r.qty), side: r.side });
+            const oldest = got[got.length - 1]!.time;
+            if (oldest >= end) break;
+            end = oldest;
+          }
+        } catch {
+          this.htfBuffer.delete(sym);
+          continue; // try again on the next round
+        }
+        const seen = new Set(rows.map((r) => r.id));
+        const all = [...rows.filter((r) => r.t >= from), ...(this.htfBuffer.get(sym) ?? []).filter((r) => !seen.has(r.id))].sort((a, b) => a.t - b.t);
+        const tr = new HtfTracker(tickSizeOf(m.info));
+        for (const r of all) tr.addTrade(r.t, r.price, r.qty, r.side);
+        this.htfBuffer.delete(sym);
+        this.htf.set(sym, tr);
+        this.changed();
+      }
+    } finally {
+      this.htfLoading = false;
+    }
+  }
+
+  /** Grade calls whose 15/30/60-minute read has come due. */
+  private gradeCalls(now: number): void {
     let dirty = false;
     const byDisplay = new Map([...this.markets.values()].map((m) => [m.display, m]));
     for (const c of this.calls) {
       if (c.net.every((x) => x !== undefined)) continue;
       if (gradeCall(c, now, byDisplay.get(c.sym)?.stats.lastPrice())) dirty = true;
     }
-    if (this.callWindow !== this.windowMin) {
-      // Window changed: states under the old window must not count as "entered".
-      this.callStates.clear();
-      this.callWindow = this.windowMin;
-    }
-    if (this.status === 'live' && this.warming === 0) {
-      const windowMs = this.windowMin * 60_000;
-      for (const m of this.markets.values()) {
-        if (!m.session.open) continue;
-        const { regime: r } = this.regimeOf(m, now, windowMs);
-        const prev = this.callStates.get(m.display);
-        this.callStates.set(m.display, r.state);
-        for (const w of this.watches) if (w.sym === m.display && w.windowMin === this.windowMin && resolveWatch(w, now, r.state)) dirty = true;
-        if (prev !== undefined && prev !== r.state && (r.state === 'coiling' || r.state === 'quiet')) {
-          const wkey = `${m.display}:${this.windowMin}:${r.state}`;
-          if (now - (this.lastCallAt.get(wkey) ?? 0) >= CALL_COOLDOWN_MS) {
-            this.lastCallAt.set(wkey, now);
-            this.watches.push({ t: now, sym: m.display, windowMin: this.windowMin, from: r.state });
-            dirty = true;
-          }
-        }
-        if (!becameActionable(prev, r.state) || r.dir === 0) continue;
-        const key = `${m.display}:${this.windowMin}`;
-        if (now - (this.lastCallAt.get(key) ?? 0) < CALL_COOLDOWN_MS) continue;
-        const price = m.stats.lastPrice();
-        const spread = m.stats.summary(now, 5 * 60_000).spreadBps;
-        if (!(price! > 0) || spread === undefined) continue;
-        this.lastCallAt.set(key, now);
-        this.calls.push(openCall(now, m.display, this.windowMin, r.state as 'breakout' | 'trending', r.dir, price!, spread, Number(m.info.takerFee ?? 0) || 0));
-        dirty = true;
-      }
-    }
-    // A watch whose market closed or whose window was switched away expires as "didn't move".
-    for (const w of this.watches) if (resolveWatch(w, now, undefined)) dirty = true;
-    if (!dirty) return;
-    const cut = now - CALLS_KEEP_MS;
+    if (dirty) this.saveCalls();
+  }
+
+  private saveCalls(): void {
+    const cut = Date.now() - CALLS_KEEP_MS;
     while (this.calls.length && this.calls[0]!.t < cut) this.calls.shift();
-    while (this.watches.length && this.watches[0]!.t < cut) this.watches.shift();
     try {
-      localStorage.setItem(WATCH_KEY, JSON.stringify(this.watches));
       localStorage.setItem(CALLS_KEY, JSON.stringify(this.calls));
     } catch {
       /* storage full or unavailable: keep in memory */
@@ -220,10 +275,8 @@ export class Engine {
 
   clearCalls(): void {
     this.calls = [];
-    this.watches = [];
     try {
       localStorage.removeItem(CALLS_KEY);
-      localStorage.removeItem(WATCH_KEY);
     } catch {
       /* nothing stored */
     }
@@ -408,15 +461,6 @@ function loadCalls(): Call[] {
   try {
     const raw = localStorage.getItem(CALLS_KEY);
     return raw ? (JSON.parse(raw) as Call[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-function loadList<T>(key: string): T[] {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T[]) : [];
   } catch {
     return [];
   }

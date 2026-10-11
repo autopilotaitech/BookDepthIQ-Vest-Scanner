@@ -1,13 +1,13 @@
 // Scorecard: grade the scanner's own calls. Pure: no I/O.
 //
-// A CALL opens when a market enters BREAKOUT or TRENDING with a direction. Its entry is the price
-// then; 5, 15 and 30 minutes later the price is read again. The result is in bps of the entry,
-// signed by the call's direction, MINUS the cost of a taker round trip (the spread plus Vest's
-// taker fee each way). So a positive average means "taking every call by hand would have paid".
+// A CALL is a trend + level setup (src/scan/setup.ts). Its entry is the price then; 15, 30 and 60
+// minutes later the price is read again. The result is in bps of the entry, signed by the call's
+// direction, MINUS the cost of a taker round trip (the spread plus Vest's taker fee each way). So
+// a positive average means "taking every call by hand would have paid".
 
-export const HORIZONS_MIN = [5, 15, 30] as const;
-/** Same market, same window: no new call within this long of the last one (overlap). */
-export const CALL_COOLDOWN_MS = 10 * 60_000;
+import type { LevelName, SetupKind } from './setup.js';
+
+export const HORIZONS_MIN = [15, 30, 60] as const;
 /** A horizon read later than this past its time is dropped (scanner was closed), not guessed. */
 export const READ_GRACE_MS = 2 * 60_000;
 /** Fewer graded calls than this: too few to trust. */
@@ -16,8 +16,8 @@ export const MIN_TRUSTED = 30;
 export interface Call {
   t: number;
   sym: string; // display symbol
-  windowMin: number;
-  state: 'breakout' | 'trending';
+  kind: SetupKind;
+  level: LevelName;
   dir: 1 | -1;
   entry: number;
   costBps: number;
@@ -25,8 +25,8 @@ export interface Call {
   net: Array<number | null | undefined>;
 }
 
-export function openCall(t: number, sym: string, windowMin: number, state: Call['state'], dir: 1 | -1, entry: number, spreadBps: number, takerFee: number): Call {
-  return { t, sym, windowMin, state, dir, entry, costBps: spreadBps + 2 * takerFee * 1e4, net: HORIZONS_MIN.map(() => undefined) };
+export function openCall(t: number, sym: string, kind: SetupKind, level: LevelName, dir: 1 | -1, entry: number, spreadBps: number, takerFee: number): Call {
+  return { t, sym, kind, level, dir, entry, costBps: spreadBps + 2 * takerFee * 1e4, net: HORIZONS_MIN.map(() => undefined) };
 }
 
 /** Fill in any horizon that has come due. Returns true if something changed. */
@@ -51,35 +51,8 @@ export interface Grade {
 
 export interface ScoreRow {
   label: string;
-  title?: string;
-  /** Following the call, one per horizon. */
+  /** One per horizon. */
   grades: Grade[];
-  /** Fading it (the opposite trade, paying the same costs), one per horizon. */
-  fades: Grade[];
-}
-
-/** Net bps of the OPPOSITE trade: −(gross move) − cost = −net − 2·cost. */
-export function fadeNet(c: Call, i: number): number | null | undefined {
-  const n = c.net[i];
-  return typeof n === 'number' ? -n - 2 * c.costBps : n;
-}
-
-/**
- * The one pre-set test (2026-10-11): on a 2-week replay, FADING 1-min BREAKOUT/TRENDING calls on
- * NQ/ES during 8:30–10:30 Chicago made +2.2 bps net at 15 min (n = 144, t = 1.8: not proven).
- * This row tracks it live, unchanged, so new data confirms or kills it.
- */
-export const OPEN_DRIVE = { syms: ['NQ-PERP', 'ES-PERP'], fromMin: 8 * 60 + 30, toMin: 10 * 60 + 30, tz: 'America/Chicago' } as const;
-
-export function inOpenDrive(c: Pick<Call, 't' | 'sym'>): boolean {
-  if (!(OPEN_DRIVE.syms as readonly string[]).includes(c.sym)) return false;
-  const p = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', { timeZone: OPEN_DRIVE.tz, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-      .formatToParts(new Date(c.t))
-      .map((x) => [x.type, x.value]),
-  );
-  const m = Number(p.hour) * 60 + Number(p.minute);
-  return p.weekday !== 'Sat' && p.weekday !== 'Sun' && m >= OPEN_DRIVE.fromMin && m < OPEN_DRIVE.toMin;
 }
 
 function grade(xs: number[]): Grade {
@@ -87,67 +60,19 @@ function grade(xs: number[]): Grade {
   return { n: xs.length, avgBps: xs.reduce((a, b) => a + b, 0) / xs.length, winRate: xs.filter((x) => x > 0).length / xs.length };
 }
 
-/** Scorecard rows for one window: BREAKOUT, TRENDING, all, and the NQ/ES opening-drive test. */
-export function scorecard(calls: Call[], windowMin: number): ScoreRow[] {
-  const mine = calls.filter((c) => c.windowMin === windowMin);
-  const nums = (xs: Array<number | null | undefined>) => xs.filter((x): x is number => typeof x === 'number');
-  const row = (label: string, list: Call[], title?: string): ScoreRow => ({
+/** Scorecard rows: breaks, pullbacks, all. */
+export function scorecard(calls: Call[]): ScoreRow[] {
+  const row = (label: string, list: Call[]): ScoreRow => ({
     label,
-    title,
-    grades: HORIZONS_MIN.map((_, i) => grade(nums(list.map((c) => c.net[i])))),
-    fades: HORIZONS_MIN.map((_, i) => grade(nums(list.map((c) => fadeNet(c, i))))),
+    grades: HORIZONS_MIN.map((_, i) => grade(list.map((c) => c.net[i]).filter((x): x is number => typeof x === 'number'))),
   });
-  return [
-    row('BREAKOUT', mine.filter((c) => c.state === 'breakout')),
-    row('TRENDING', mine.filter((c) => c.state === 'trending')),
-    row('all calls', mine),
-    row(
-      'NQ/ES 8:30–10:30 CT',
-      mine.filter(inOpenDrive),
-      'The pre-set test: a 2-week replay found FADING 1-min calls on NQ/ES in the opening drive made +2.2 bps net at 15 min (n=144, t=1.8, not proven). Watch the fade figure at 15 min.',
-    ),
-  ];
+  return [row('BREAK of a level', calls.filter((c) => c.kind === 'break')), row('PULLBACK that held', calls.filter((c) => c.kind === 'pullback')), row('all calls', calls)];
 }
 
 export function callsCsv(calls: Call[]): string {
   const f = (v: number | null | undefined) => (typeof v === 'number' ? v.toFixed(2) : v === null ? 'missed' : '');
   return [
-    `time,market,window_min,state,dir,entry,cost_bps,${HORIZONS_MIN.map((h) => `net_${h}m_bps`).join(',')}`,
-    ...calls.map((c) => `${new Date(c.t).toISOString()},${c.sym},${c.windowMin},${c.state},${c.dir > 0 ? 'long' : 'short'},${c.entry},${c.costBps.toFixed(2)},${c.net.map(f).join(',')}`),
+    `time,market,kind,level,dir,entry,cost_bps,${HORIZONS_MIN.map((h) => `net_${h}m_bps`).join(',')}`,
+    ...calls.map((c) => `${new Date(c.t).toISOString()},${c.sym},${c.kind},${c.level},${c.dir > 0 ? 'long' : 'short'},${c.entry},${c.costBps.toFixed(2)},${c.net.map(f).join(',')}`),
   ].join('\n');
-}
-
-// COILING has no direction, so it is graded differently: did the market start moving (BREAKOUT,
-// TRENDING or EXPANDING) within 30 minutes? QUIET entries are graded the same way as a control:
-// COILING only means something if it moves more often than QUIET does.
-
-export const WATCH_MS = 30 * 60_000;
-export const MOVING_STATES = ['breakout', 'trending', 'expanding'] as const;
-
-export interface Watch {
-  t: number;
-  sym: string;
-  windowMin: number;
-  from: 'coiling' | 'quiet';
-  /** true = moved within 30 min, false = didn't, undefined = still watching. */
-  moved?: boolean;
-}
-
-/** Resolve a watch from the market's state now. Returns true if it changed. */
-export function resolveWatch(w: Watch, now: number, state: string | undefined): boolean {
-  if (w.moved !== undefined) return false;
-  if (now - w.t > WATCH_MS) w.moved = false;
-  else if (state !== undefined && (MOVING_STATES as readonly string[]).includes(state)) w.moved = true;
-  else return false;
-  return true;
-}
-
-export interface WatchRate {
-  n: number;
-  rate: number | undefined;
-}
-
-export function watchRate(watches: Watch[], windowMin: number, from: Watch['from']): WatchRate {
-  const done = watches.filter((w) => w.windowMin === windowMin && w.from === from && w.moved !== undefined);
-  return { n: done.length, rate: done.length ? done.filter((w) => w.moved).length / done.length : undefined };
 }

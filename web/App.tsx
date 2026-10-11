@@ -3,9 +3,10 @@ import { Engine, type Market } from './engine';
 import type { Category } from '../src/scan/score';
 import { avgPerMin } from '../src/scan/history';
 import type { Summary } from '../src/scan/metrics';
-import { TIMEFRAMES, atr, becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
+import { TIMEFRAMES, atr, type Regime, type RegimeState } from '../src/scan/regime';
 import { benchmarkFor, flowDiverges, flowShare, relativeBps } from '../src/scan/relative';
-import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard, watchRate, type Grade } from '../src/scan/scorecard';
+import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard, type Grade } from '../src/scan/scorecard';
+import type { Setup } from '../src/scan/setup';
 import { ROOM_GOOD, ROOM_OK, sizeCheck, type SizeCheck } from '../src/scan/size';
 
 // Per-viewer settings (window, filter, alerts, sort) in localStorage; guarded, defaults always work.
@@ -83,18 +84,22 @@ function Spark({ data, tone }: { data: number[]; tone: string }) {
   );
 }
 
-function GradeLine({ label, g }: { label: string; g: Grade }) {
-  if (!g.n) return <span className="muted">{label} —</span>;
+function GradeLine({ g }: { g: Grade }) {
   return (
     <span>
-      <span className="muted">{label} </span>
       <span className={g.avgBps! > 0 ? 'up' : 'down'}>
         {g.avgBps! > 0 ? '+' : ''}
         {g.avgBps!.toFixed(1)} bps
       </span>{' '}
-      · {Math.round(g.winRate! * 100)}% · n={g.n}
+      · {Math.round(g.winRate! * 100)}% win · n={g.n}
     </span>
   );
+}
+
+/** "▲ BREAK prior-day high 25,120" */
+function setupText(s: Setup): string {
+  const px = s.price >= 1000 ? s.price.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(+s.price.toPrecision(6));
+  return `${s.dir > 0 ? '▲' : '▼'} ${s.kind === 'break' ? 'BREAK' : 'PULLBACK held'} ${s.level} ${px}`;
 }
 
 export function App() {
@@ -102,8 +107,7 @@ export function App() {
   const [, setTick] = useState(0);
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
   const [toast, setToast] = useState<string>('');
-  const prevStates = useRef(new Map<string, RegimeState>());
-  const lastAlert = useRef(new Map<string, number>());
+  const alerted = useRef(0); // engine.events already alerted
 
   useEffect(() => {
     const off = engine.subscribe(() => setTick((n) => n + 1));
@@ -127,7 +131,6 @@ export function App() {
   const now = Date.now();
   engine.updateSessions(now, false);
   const windowMs = prefs.windowMin * 60_000;
-  engine.windowMin = prefs.windowMin; // the scorecard grades calls for the window being viewed
   const tf = TIMEFRAMES[prefs.windowMin];
   const barsOf = (m: Market) => m.stats.bars(now, tf.slowBars + tf.fastBars + 5, tf.barMs);
   const benchBars = new Map<string, ReturnType<typeof barsOf>>();
@@ -150,24 +153,22 @@ export function App() {
     return { m, s, score, r, spark: m.stats.perMinute(now, 60), bench, rs, flow: flowShare(fs.buyUsd, fs.sellUsd), size };
   });
 
-  // Alerts: a liquid market entering BREAKOUT or TRENDING (10-minute cooldown per market).
+  // Alerts: a trend + level setup firing (the scanner's calls). Events alerted once each.
   useEffect(() => {
-    for (const r of rows) {
-      const sym = r.m.info.symbol;
-      const prev = prevStates.current.get(sym);
-      if (prefs.alertsOn && engine.warming === 0 && becameActionable(prev, r.r.state) && now - (lastAlert.current.get(sym) ?? 0) > 10 * 60_000) {
-        lastAlert.current.set(sym, now);
-        const msg = `${r.m.display} ${r.r.dir > 0 ? '▲' : r.r.dir < 0 ? '▼' : ''} ${STATE_LABEL[r.r.state]}: vol ${r.r.volRatio?.toFixed(1) ?? '?'}×, ${fmtUsd(r.s.usdPerMin)}/min`;
-        setToast(msg);
-        const chrome = (globalThis as { chrome?: { notifications?: { create(o: object): void } } }).chrome;
-        try {
-          chrome?.notifications?.create({ type: 'basic', iconUrl: 'icon128.png', title: 'Vest Liquidity Scanner', message: msg });
-        } catch {
-          /* in-page toast only */
-        }
+    const evs = engine.events;
+    if (alerted.current > evs.length) alerted.current = 0;
+    for (const e of evs.slice(alerted.current)) {
+      if (!prefs.alertsOn) continue;
+      const msg = `${e.sym} ${setupText(e.setup)} · 15m trend ${e.setup.dir > 0 ? 'up' : 'down'}`;
+      setToast(msg);
+      const chrome = (globalThis as { chrome?: { notifications?: { create(o: object): void } } }).chrome;
+      try {
+        chrome?.notifications?.create({ type: 'basic', iconUrl: 'icon128.png', title: 'Vest Liquidity Scanner', message: msg });
+      } catch {
+        /* in-page toast only */
       }
-      prevStates.current.set(sym, r.r.state);
     }
+    alerted.current = evs.length;
   });
 
   const visible = rows
@@ -244,8 +245,8 @@ export function App() {
           size $
           <input type="number" min={0} step={500} value={prefs.sizeUsd} onChange={(e) => update({ sizeUsd: Math.max(0, Number(e.target.value) || 0) })} />
         </label>
-        <label title="notify when a liquid market enters BREAKOUT or TRENDING">
-          <input type="checkbox" checked={prefs.alertsOn} onChange={(e) => update({ alertsOn: e.target.checked })} /> alert on breakout / trend
+        <label title="notify when a trend + level setup fires (15-min trend, then a break of or pullback to the prior-day high/low, today's high/low or VWAP)">
+          <input type="checkbox" checked={prefs.alertsOn} onChange={(e) => update({ alertsOn: e.target.checked })} /> alert on setups
         </label>
       </header>
 
@@ -269,7 +270,9 @@ export function App() {
             <tr>
               <th>Market</th>
               {th('opp', 'Opportunity', 'liquidity × volatility expansion × clean direction, 0–100')}
-              <th title="BREAKOUT / TRENDING = moving (not an entry signal: see the scorecard) · EXPANDING / COILING = watch · CHOP / DEAD = skip">State</th>
+              <th title="15-minute SuperTrend (the panel's engine), from ~2 days of trades. Tracked for the 10 most traded markets; — = no trend yet or not tracked">15m trend</th>
+              <th title="the latest trend + level setup in the last 30 min: a BREAK of, or a PULLBACK that held, the prior-day high/low, today's high/low or VWAP, in the 15m trend's direction">Setup</th>
+              <th title="short-term activity, not an entry signal: BREAKOUT / TRENDING = moving · EXPANDING / COILING = watch · CHOP / DEAD = skip">State</th>
               {th('vol', 'Vol ×', prefs.windowMin === 1 ? 'average 15-s range, last 1 min ÷ last 15 min (1.0 = normal)' : prefs.windowMin === 5 ? 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)' : 'average 1-min range, last 15 min ÷ last 60 min (1.0 = normal)')}
               {th('eff', 'Trend', `net move ÷ distance travelled over the last ${prefs.windowMin === 1 ? '2' : prefs.windowMin === 5 ? '15' : '30'} min (100% = straight line, 0% = chop)`)}
               <th title="$/min now ÷ this market's usual $/min for this hour">RVOL</th>
@@ -297,6 +300,19 @@ export function App() {
                   <td>
                     <span className={`opp ${r.r.opportunity >= 50 ? 's-hi' : r.r.opportunity >= 25 ? 's-mid' : ''}`}>{r.r.state === 'dead' || r.r.state === 'warming' ? '—' : r.r.opportunity}</span>
                   </td>
+                  {(() => {
+                    const d = engine.htf.get(r.m.info.symbol)?.trendDir();
+                    return <td className={d === 'up' ? 'up' : d === 'down' ? 'down' : ''}>{d === 'up' ? '▲ up' : d === 'down' ? '▼ down' : '—'}</td>;
+                  })()}
+                  {(() => {
+                    const su = engine.lastSetup.get(r.m.display);
+                    const fresh = su && now - su.t < 30 * 60_000;
+                    return (
+                      <td className={fresh ? (su.dir > 0 ? 'up' : 'down') : ''} title={fresh ? `${new Date(su.t).toLocaleTimeString()} · close ${su.close}` : ''}>
+                        {fresh ? setupText(su) : '—'}
+                      </td>
+                    );
+                  })()}
                   <td>
                     <span className={`state st-${r.r.state}`} title={STATE_TITLE[r.r.state]}>
                       {r.r.dir > 0 ? '▲ ' : r.r.dir < 0 ? '▼ ' : ''}
@@ -340,7 +356,7 @@ export function App() {
             })}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={17} className="muted empty">
+                <td colSpan={19} className="muted empty">
                   {engine.status === 'starting' ? 'Loading Vest markets…' : 'No markets match this filter right now.'}
                 </td>
               </tr>
@@ -353,7 +369,7 @@ export function App() {
         <div className="hourshead">
           <h2>Scorecard: are the calls any good?</h2>
           <span className="muted">
-            every entry into BREAKOUT / TRENDING on the {prefs.windowMin}-min window, graded {HORIZONS_MIN.join(' / ')} min later, following the call and fading it · net of spread + taker fees both ways · recorded while this window is open
+            every trend + level setup (15m trend, then a break of or pullback to a level), graded {HORIZONS_MIN.join(' / ')} min later · net of spread + taker fees both ways · recorded while this window is open
           </span>
           <span className="spacer" />
           <button className="ghost" onClick={() => void navigator.clipboard?.writeText(callsCsv(engine.calls)).then(() => setToast('Calls copied as CSV'), () => setToast('Copy failed'))}>
@@ -375,36 +391,18 @@ export function App() {
             </tr>
           </thead>
           <tbody>
-            {scorecard(engine.calls, prefs.windowMin).map((row) => (
-              <tr key={row.label} title={row.title}>
+            {scorecard(engine.calls).map((row) => (
+              <tr key={row.label}>
                 <td>{row.label}</td>
                 {row.grades.map((g, i) => (
                   <td key={i} className={g.n < MIN_TRUSTED ? 'faint' : ''} title={g.n < MIN_TRUSTED ? `only ${g.n} graded: under ${MIN_TRUSTED}, too few to trust` : ''}>
-                    {g.n === 0 ? (
-                      '—'
-                    ) : (
-                      <>
-                        <GradeLine label="follow" g={g} />
-                        <br />
-                        <GradeLine label="fade" g={row.fades[i]!} />
-                      </>
-                    )}
+                    {g.n === 0 ? '—' : <GradeLine g={g} />}
                   </td>
                 ))}
               </tr>
             ))}
           </tbody>
         </table>
-        {(() => {
-          const coil = watchRate(engine.watches, prefs.windowMin, 'coiling');
-          const quiet = watchRate(engine.watches, prefs.windowMin, 'quiet');
-          const pct = (w: typeof coil) => (w.rate === undefined ? '—' : `${Math.round(w.rate * 100)}%`);
-          return (
-            <p className={`coilrate ${coil.n < MIN_TRUSTED || quiet.n < MIN_TRUSTED ? 'faint' : ''}`} title="share that entered BREAKOUT, TRENDING or EXPANDING within 30 minutes. COILING only means something if it beats QUIET.">
-              Started moving within 30 min: <b>COILING {pct(coil)}</b> (n={coil.n}) vs QUIET {pct(quiet)} (n={quiet.n}, the control)
-            </p>
-          );
-        })()}
       </section>
 
       <section className="hours">
