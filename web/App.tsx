@@ -5,7 +5,7 @@ import { avgPerMin } from '../src/scan/history';
 import type { Summary } from '../src/scan/metrics';
 import { TIMEFRAMES, atr, becameActionable, type Regime, type RegimeState } from '../src/scan/regime';
 import { benchmarkFor, flowDiverges, flowShare, relativeBps } from '../src/scan/relative';
-import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard, watchRate } from '../src/scan/scorecard';
+import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard, watchRate, type Grade } from '../src/scan/scorecard';
 import { ROOM_GOOD, ROOM_OK, sizeCheck, type SizeCheck } from '../src/scan/size';
 
 // Per-viewer settings (window, filter, alerts, sort) in localStorage; guarded, defaults always work.
@@ -25,8 +25,8 @@ const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, al
 
 const STATE_LABEL: Record<RegimeState, string> = { breakout: 'BREAKOUT', trending: 'TRENDING', expanding: 'EXPANDING', coiling: 'COILING', chop: 'CHOP', quiet: 'QUIET', dead: 'DEAD', warming: 'WARMING' };
 const STATE_TITLE: Record<RegimeState, string> = {
-  breakout: 'beyond its recent high/low (15 min on the 1-min window, 60 min otherwise) with volatility ≥ 1.5× and a clean move: the setup you want',
-  trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×',
+  breakout: 'beyond its recent high/low (15 min on the 1-min window, 60 min otherwise) with volatility ≥ 1.5× and a clean move. A move, not an entry: in a 2-week replay, following these lost money after costs. Check the scorecard.',
+  trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×. A move, not an entry: in a 2-week replay, following these lost money after costs. Check the scorecard.',
   expanding: 'volatility ≥ 1.5× but no clean direction yet: watch',
   chop: 'moving back and forth (efficiency < 0.3): skip',
   coiling: 'range squeezed to ≤ 0.6× normal while trading is at least usual for the hour (needs RVOL): watch for the break',
@@ -80,6 +80,20 @@ function Spark({ data, tone }: { data: number[]; tone: string }) {
       <polyline points={pts} fill="none" stroke={tone} strokeWidth="1.5" strokeLinejoin="round" />
       <circle cx="110" cy={last.toFixed(1)} r="2" fill={tone} />
     </svg>
+  );
+}
+
+function GradeLine({ label, g }: { label: string; g: Grade }) {
+  if (!g.n) return <span className="muted">{label} —</span>;
+  return (
+    <span>
+      <span className="muted">{label} </span>
+      <span className={g.avgBps! > 0 ? 'up' : 'down'}>
+        {g.avgBps! > 0 ? '+' : ''}
+        {g.avgBps!.toFixed(1)} bps
+      </span>{' '}
+      · {Math.round(g.winRate! * 100)}% · n={g.n}
+    </span>
   );
 }
 
@@ -255,7 +269,7 @@ export function App() {
             <tr>
               <th>Market</th>
               {th('opp', 'Opportunity', 'liquidity × volatility expansion × clean direction, 0–100')}
-              <th title="BREAKOUT / TRENDING = trade it · EXPANDING = watch · CHOP / DEAD = skip">State</th>
+              <th title="BREAKOUT / TRENDING = moving (not an entry signal: see the scorecard) · EXPANDING / COILING = watch · CHOP / DEAD = skip">State</th>
               {th('vol', 'Vol ×', prefs.windowMin === 1 ? 'average 15-s range, last 1 min ÷ last 15 min (1.0 = normal)' : prefs.windowMin === 5 ? 'average 1-min range, last 5 min ÷ last 60 min (1.0 = normal)' : 'average 1-min range, last 15 min ÷ last 60 min (1.0 = normal)')}
               {th('eff', 'Trend', `net move ÷ distance travelled over the last ${prefs.windowMin === 1 ? '2' : prefs.windowMin === 5 ? '15' : '30'} min (100% = straight line, 0% = chop)`)}
               <th title="$/min now ÷ this market's usual $/min for this hour">RVOL</th>
@@ -297,8 +311,8 @@ export function App() {
                     {r.bench && <small> {r.bench.replace('-PERP', '')}</small>}
                   </td>
                   <td className={r.flow === undefined ? '' : r.flow > 0 ? 'up' : r.flow < 0 ? 'down' : ''}>
-                    {flowDiverges(r.r.dir, r.flow) && <span className="diverge" title="price is moving against the flow">⚠ </span>}
-                    {r.flow === undefined ? '—' : `${r.flow > 0 ? 'buy' : r.flow < 0 ? 'sell' : ''} ${Math.round(Math.abs(r.flow) * 100)}%`}
+                    {r.r.state !== 'dead' && flowDiverges(r.r.dir, r.flow) && <span className="diverge" title="price is moving against the flow">⚠ </span>}
+                    {r.flow === undefined ? '—' : Math.abs(r.flow) < 0.005 ? 'even' : `${r.flow > 0 ? 'buy' : 'sell'} ${Math.round(Math.abs(r.flow) * 100)}%`}
                   </td>
                   <td>
                     <span className={`chip ${!r.m.session.open ? 'closed' : r.m.session.session === 'regular' || r.m.session.session === 'open' ? 'live' : 'ah'}`}>
@@ -339,7 +353,7 @@ export function App() {
         <div className="hourshead">
           <h2>Scorecard: are the calls any good?</h2>
           <span className="muted">
-            every entry into BREAKOUT / TRENDING on the {prefs.windowMin}-min window, graded {HORIZONS_MIN.join(' / ')} min later · net of spread + taker fees both ways · recorded while this window is open
+            every entry into BREAKOUT / TRENDING on the {prefs.windowMin}-min window, graded {HORIZONS_MIN.join(' / ')} min later, following the call and fading it · net of spread + taker fees both ways · recorded while this window is open
           </span>
           <span className="spacer" />
           <button className="ghost" onClick={() => void navigator.clipboard?.writeText(callsCsv(engine.calls)).then(() => setToast('Calls copied as CSV'), () => setToast('Copy failed'))}>
@@ -362,7 +376,7 @@ export function App() {
           </thead>
           <tbody>
             {scorecard(engine.calls, prefs.windowMin).map((row) => (
-              <tr key={row.label}>
+              <tr key={row.label} title={row.title}>
                 <td>{row.label}</td>
                 {row.grades.map((g, i) => (
                   <td key={i} className={g.n < MIN_TRUSTED ? 'faint' : ''} title={g.n < MIN_TRUSTED ? `only ${g.n} graded: under ${MIN_TRUSTED}, too few to trust` : ''}>
@@ -370,11 +384,9 @@ export function App() {
                       '—'
                     ) : (
                       <>
-                        <span className={g.avgBps! > 0 ? 'up' : 'down'}>
-                          {g.avgBps! > 0 ? '+' : ''}
-                          {g.avgBps!.toFixed(1)} bps
-                        </span>{' '}
-                        · {Math.round(g.winRate! * 100)}% win · n={g.n}
+                        <GradeLine label="follow" g={g} />
+                        <br />
+                        <GradeLine label="fade" g={row.fades[i]!} />
                       </>
                     )}
                   </td>

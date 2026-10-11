@@ -31,7 +31,7 @@ describe('scorecard', () => {
     gradeCall(b, 5 * 60_000, 99);
     gradeCall(other, 5 * 60_000, 200);
     const rows = scorecard([a, b, other], 1);
-    expect(rows.map((r) => r.label)).toEqual(['BREAKOUT', 'TRENDING', 'all calls']);
+    expect(rows.map((r) => r.label)).toEqual(['BREAKOUT', 'TRENDING', 'all calls', 'NQ/ES 8:30–10:30 CT']);
     expect(rows[0]!.grades[0]).toEqual({ n: 1, avgBps: expect.closeTo(100, 6), winRate: 1 });
     expect(rows[2]!.grades[0]!.n).toBe(2);
     expect(rows[2]!.grades[0]!.avgBps).toBeCloseTo(0);
@@ -132,5 +132,24 @@ describe('v0.6 size check', () => {
     expect(sizeCheck(30_000, 100, 0.5, 1, 0.0001, 20_000)!.walks).toBe(true);
     expect(sizeCheck(0, 100, 0.5, 1, 0, 1)).toBeUndefined();
     expect(sizeCheck(1000, undefined, 0.5, 1, 0, 1)).toBeUndefined();
+  });
+});
+
+import { fadeNet, inOpenDrive } from '../src/scan/scorecard.js';
+
+describe('v0.6.1 fade + open-drive test', () => {
+  it('fade pays the same costs on the opposite move', () => {
+    const c = openCall(0, 'NQ-PERP', 1, 'breakout', 1, 100, 1, 0.0001); // cost 3
+    gradeCall(c, 5 * 60_000, 99.9); // gross −10 → follow −13
+    expect(c.net[0]).toBeCloseTo(-13);
+    expect(fadeNet(c, 0)).toBeCloseTo(7); // gross +10 − 3
+    expect(fadeNet(c, 1)).toBeUndefined();
+  });
+  it('opening drive = NQ/ES, weekdays 8:30–10:30 Chicago', () => {
+    const mon0900 = Date.UTC(2026, 9, 12, 14, 0); // Mon 09:00 CDT
+    expect(inOpenDrive({ t: mon0900, sym: 'NQ-PERP' })).toBe(true);
+    expect(inOpenDrive({ t: mon0900, sym: 'BTC-PERP' })).toBe(false);
+    expect(inOpenDrive({ t: Date.UTC(2026, 9, 12, 16, 0), sym: 'ES-PERP' })).toBe(false); // 11:00
+    expect(inOpenDrive({ t: Date.UTC(2026, 9, 11, 14, 0), sym: 'NQ-PERP' })).toBe(false); // Sunday
   });
 });

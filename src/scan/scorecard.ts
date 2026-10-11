@@ -51,8 +51,35 @@ export interface Grade {
 
 export interface ScoreRow {
   label: string;
-  /** One per horizon. */
+  title?: string;
+  /** Following the call, one per horizon. */
   grades: Grade[];
+  /** Fading it (the opposite trade, paying the same costs), one per horizon. */
+  fades: Grade[];
+}
+
+/** Net bps of the OPPOSITE trade: −(gross move) − cost = −net − 2·cost. */
+export function fadeNet(c: Call, i: number): number | null | undefined {
+  const n = c.net[i];
+  return typeof n === 'number' ? -n - 2 * c.costBps : n;
+}
+
+/**
+ * The one pre-set test (2026-10-11): on a 2-week replay, FADING 1-min BREAKOUT/TRENDING calls on
+ * NQ/ES during 8:30–10:30 Chicago made +2.2 bps net at 15 min (n = 144, t = 1.8: not proven).
+ * This row tracks it live, unchanged, so new data confirms or kills it.
+ */
+export const OPEN_DRIVE = { syms: ['NQ-PERP', 'ES-PERP'], fromMin: 8 * 60 + 30, toMin: 10 * 60 + 30, tz: 'America/Chicago' } as const;
+
+export function inOpenDrive(c: Pick<Call, 't' | 'sym'>): boolean {
+  if (!(OPEN_DRIVE.syms as readonly string[]).includes(c.sym)) return false;
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', { timeZone: OPEN_DRIVE.tz, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+      .formatToParts(new Date(c.t))
+      .map((x) => [x.type, x.value]),
+  );
+  const m = Number(p.hour) * 60 + Number(p.minute);
+  return p.weekday !== 'Sat' && p.weekday !== 'Sun' && m >= OPEN_DRIVE.fromMin && m < OPEN_DRIVE.toMin;
 }
 
 function grade(xs: number[]): Grade {
@@ -60,14 +87,26 @@ function grade(xs: number[]): Grade {
   return { n: xs.length, avgBps: xs.reduce((a, b) => a + b, 0) / xs.length, winRate: xs.filter((x) => x > 0).length / xs.length };
 }
 
-/** Scorecard rows for one window: BREAKOUT, TRENDING, all. */
+/** Scorecard rows for one window: BREAKOUT, TRENDING, all, and the NQ/ES opening-drive test. */
 export function scorecard(calls: Call[], windowMin: number): ScoreRow[] {
   const mine = calls.filter((c) => c.windowMin === windowMin);
-  const row = (label: string, list: Call[]): ScoreRow => ({
+  const nums = (xs: Array<number | null | undefined>) => xs.filter((x): x is number => typeof x === 'number');
+  const row = (label: string, list: Call[], title?: string): ScoreRow => ({
     label,
-    grades: HORIZONS_MIN.map((_, i) => grade(list.map((c) => c.net[i]).filter((x): x is number => typeof x === 'number'))),
+    title,
+    grades: HORIZONS_MIN.map((_, i) => grade(nums(list.map((c) => c.net[i])))),
+    fades: HORIZONS_MIN.map((_, i) => grade(nums(list.map((c) => fadeNet(c, i))))),
   });
-  return [row('BREAKOUT', mine.filter((c) => c.state === 'breakout')), row('TRENDING', mine.filter((c) => c.state === 'trending')), row('all calls', mine)];
+  return [
+    row('BREAKOUT', mine.filter((c) => c.state === 'breakout')),
+    row('TRENDING', mine.filter((c) => c.state === 'trending')),
+    row('all calls', mine),
+    row(
+      'NQ/ES 8:30–10:30 CT',
+      mine.filter(inOpenDrive),
+      'The pre-set test: a 2-week replay found FADING 1-min calls on NQ/ES in the opening drive made +2.2 bps net at 15 min (n=144, t=1.8, not proven). Watch the fade figure at 15 min.',
+    ),
+  ];
 }
 
 export function callsCsv(calls: Call[]): string {
