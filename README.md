@@ -104,11 +104,11 @@ one-minute read would call good markets dead between prints.
 One call per market per 30 minutes. The **15m trend** and **Setup** columns show them, and
 **alert on setups** notifies you.
 
-**Scorecard: are the calls any good?** Every call is graded 15, 30 and 60 minutes later: the move
-in the call's direction **minus a taker round trip** (spread plus Vest's fee each way), with the
-share that made money and how many were graded. Under 30 graded calls a row is greyed out. Calls
-are recorded only while the scanner window is open, kept 14 days, and **Copy calls as CSV** exports
-them.
+**Calls** (collapsed under the table): one line with each market's average result 30 minutes after
+its calls, **after a taker round trip** (spread plus Vest's fee each way), e.g. `NQ +2.1 (5) · BTC
+−0.4 (4)`. Expand it for the last 20 calls: time, market, setup and the result at 15 / 30 / 60
+minutes in bps ("…" pending, "—" the scanner was closed then). Calls are recorded only while the
+scanner window is open, kept 14 days; **Copy as CSV** exports them.
 
 **What the replays found.** `scripts/replay-calls.ts` showed the old calls (entering BREAKOUT /
 TRENDING on 15-second bars) **lost about 2 bps per call after costs** over 26 Sep – 10 Oct on BTC,

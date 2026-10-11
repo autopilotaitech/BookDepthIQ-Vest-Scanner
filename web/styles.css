@@ -100,3 +100,10 @@ td.faint .up, td.faint .down { opacity: 0.6; }
 .st-coiling { background: rgba(192, 132, 252, 0.14); color: var(--accent); }
 .coilrate { margin: 8px 0 0; font-size: 12px; }
 .coilrate.faint { color: var(--faint); }
+
+/* v0.7.2 calls */
+details.calls { padding: 10px 14px; border-top: 1px solid var(--line); margin-top: 8px; }
+details.calls summary { cursor: pointer; font-size: 13px; }
+details.calls table.card { margin-top: 8px; }
+details.calls td, details.calls th { text-align: left; }
+.callsfoot { display: flex; gap: 8px; margin-top: 8px; }

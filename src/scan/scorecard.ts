@@ -10,8 +10,6 @@ import type { LevelName, SetupKind } from './setup.js';
 export const HORIZONS_MIN = [15, 30, 60] as const;
 /** A horizon read later than this past its time is dropped (scanner was closed), not guessed. */
 export const READ_GRACE_MS = 2 * 60_000;
-/** Fewer graded calls than this: too few to trust. */
-export const MIN_TRUSTED = 30;
 
 export interface Call {
   t: number;
@@ -43,30 +41,21 @@ export function gradeCall(c: Call, now: number, price: number | undefined): bool
   return changed;
 }
 
-export interface Grade {
+export interface MarketGrade {
+  sym: string;
+  /** Calls graded at 30 min (the middle horizon) and their average net bps. */
   n: number;
-  avgBps: number | undefined;
-  winRate: number | undefined;
+  avgBps: number;
 }
 
-export interface ScoreRow {
-  label: string;
-  /** One per horizon. */
-  grades: Grade[];
-}
-
-function grade(xs: number[]): Grade {
-  if (!xs.length) return { n: 0, avgBps: undefined, winRate: undefined };
-  return { n: xs.length, avgBps: xs.reduce((a, b) => a + b, 0) / xs.length, winRate: xs.filter((x) => x > 0).length / xs.length };
-}
-
-/** Scorecard rows: breaks, pullbacks, all. */
-export function scorecard(calls: Call[]): ScoreRow[] {
-  const row = (label: string, list: Call[]): ScoreRow => ({
-    label,
-    grades: HORIZONS_MIN.map((_, i) => grade(list.map((c) => c.net[i]).filter((x): x is number => typeof x === 'number'))),
-  });
-  return [row('BREAK of a level', calls.filter((c) => c.kind === 'break')), row('PULLBACK that held', calls.filter((c) => c.kind === 'pullback')), row('all calls', calls)];
+/** Average net bps at 30 min per market, most calls first. */
+export function byMarket(calls: Call[]): MarketGrade[] {
+  const m = new Map<string, number[]>();
+  for (const c of calls) {
+    const x = c.net[1];
+    if (typeof x === 'number') (m.get(c.sym) ?? m.set(c.sym, []).get(c.sym)!).push(x);
+  }
+  return [...m.entries()].map(([sym, xs]) => ({ sym, n: xs.length, avgBps: xs.reduce((a, b) => a + b, 0) / xs.length })).sort((a, b) => b.n - a.n);
 }
 
 export function callsCsv(calls: Call[]): string {

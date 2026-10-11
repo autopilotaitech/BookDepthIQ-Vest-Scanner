@@ -5,7 +5,7 @@ import { avgPerMin } from '../src/scan/history';
 import type { Summary } from '../src/scan/metrics';
 import { TIMEFRAMES, atr, type Regime, type RegimeState } from '../src/scan/regime';
 import { benchmarkFor, flowDiverges, flowShare, relativeBps } from '../src/scan/relative';
-import { HORIZONS_MIN, MIN_TRUSTED, callsCsv, scorecard, type Grade } from '../src/scan/scorecard';
+import { HORIZONS_MIN, byMarket, callsCsv } from '../src/scan/scorecard';
 import type { Setup } from '../src/scan/setup';
 import { ROOM_GOOD, ROOM_OK, sizeCheck, type SizeCheck } from '../src/scan/size';
 
@@ -20,14 +20,16 @@ interface Prefs {
   sort: 'opp' | 'score' | 'usd' | 'trades' | 'spread' | 'depth' | 'vol24h' | 'vol' | 'eff' | 'rs' | 'flow' | 'room';
   /** Your trade size in $ notional, for the size check. */
   sizeUsd: number;
+  /** Calls section expanded. */
+  callsOpen: boolean;
 }
 const PREFS_KEY = 'scanner.prefs.v3';
-const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp', sizeUsd: 5000 };
+const DEFAULT_PREFS: Prefs = { windowMin: 1, category: 'all', openOnly: true, alertsOn: false, hideChop: false, sort: 'opp', sizeUsd: 5000, callsOpen: false };
 
 const STATE_LABEL: Record<RegimeState, string> = { breakout: 'BREAKOUT', trending: 'TRENDING', expanding: 'EXPANDING', coiling: 'COILING', chop: 'CHOP', quiet: 'QUIET', dead: 'DEAD', warming: 'WARMING' };
 const STATE_TITLE: Record<RegimeState, string> = {
-  breakout: 'beyond its recent high/low (15 min on the 1-min window, 60 min otherwise) with volatility ≥ 1.5× and a clean move. A move, not an entry: in a 2-week replay, following these lost money after costs. Check the scorecard.',
-  trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×. A move, not an entry: in a 2-week replay, following these lost money after costs. Check the scorecard.',
+  breakout: 'beyond its recent high/low (15 min on the 1-min window, 60 min otherwise) with volatility ≥ 1.5× and a clean move. A move, not an entry: in a 2-week replay, following these lost money after costs.',
+  trending: 'moving one way cleanly (efficiency ≥ 0.5) with volatility ≥ 1.2×. A move, not an entry: in a 2-week replay, following these lost money after costs.',
   expanding: 'volatility ≥ 1.5× but no clean direction yet: watch',
   chop: 'moving back and forth (efficiency < 0.3): skip',
   coiling: 'range squeezed to ≤ 0.6× normal while trading is at least usual for the hour (needs RVOL): watch for the break',
@@ -84,16 +86,11 @@ function Spark({ data, tone }: { data: number[]; tone: string }) {
   );
 }
 
-function GradeLine({ g }: { g: Grade }) {
-  return (
-    <span>
-      <span className={g.avgBps! > 0 ? 'up' : 'down'}>
-        {g.avgBps! > 0 ? '+' : ''}
-        {g.avgBps!.toFixed(1)} bps
-      </span>{' '}
-      · {Math.round(g.winRate! * 100)}% win · n={g.n}
-    </span>
-  );
+/** Net bps after costs: green/red, "…" while pending, "—" if the scanner was closed at the time. */
+function Bps({ v }: { v: number | null | undefined }) {
+  if (v === undefined) return <span className="muted">…</span>;
+  if (v === null) return <span className="muted" title="the scanner was closed at that time">—</span>;
+  return <span className={v > 0 ? 'up' : 'down'}>{`${v > 0 ? '+' : ''}${v.toFixed(1)}`}</span>;
 }
 
 /** "▲ BREAK prior-day high 25,120" */
@@ -365,45 +362,65 @@ export function App() {
         </table>
       </div>
 
-      <section className="hours scorecard">
-        <div className="hourshead">
-          <h2>Scorecard: are the calls any good?</h2>
-          <span className="muted">
-            every trend + level setup (15m trend, then a break of or pullback to a level), graded {HORIZONS_MIN.join(' / ')} min later · net of spread + taker fees both ways · recorded while this window is open
-          </span>
-          <span className="spacer" />
-          <button className="ghost" onClick={() => void navigator.clipboard?.writeText(callsCsv(engine.calls)).then(() => setToast('Calls copied as CSV'), () => setToast('Copy failed'))}>
-            Copy calls as CSV
-          </button>
-          <button className="ghost" onClick={() => engine.clearCalls()}>
-            Clear
-          </button>
-        </div>
+      <details className="calls" open={prefs.callsOpen} onToggle={(e) => update({ callsOpen: (e.currentTarget as HTMLDetailsElement).open })}>
+        <summary>
+          <b>Calls</b> <span className="muted">({engine.calls.length})</span>
+          {(() => {
+            const bm = byMarket(engine.calls);
+            return bm.length ? (
+              <span className="muted">
+                {' '}· avg after costs, 30 min later:{' '}
+                {bm.map((g, i) => (
+                  <span key={g.sym}>
+                    {i ? ' · ' : ''}
+                    {g.sym.replace(/-USD-PERP$|-PERP$/, '')} <Bps v={g.avgBps} /> ({g.n})
+                  </span>
+                ))}
+              </span>
+            ) : (
+              <span className="muted"> · none graded yet</span>
+            );
+          })()}
+        </summary>
         <table className="card">
           <thead>
             <tr>
-              <th>Call</th>
+              <th>Time</th>
+              <th>Market</th>
+              <th>Setup</th>
               {HORIZONS_MIN.map((h) => (
-                <th key={h} title="average net bps · share that made money · calls graded">
-                  {h} min later
+                <th key={h} title="bps after spread + taker fee both ways">
+                  {h} min
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {scorecard(engine.calls).map((row) => (
-              <tr key={row.label}>
-                <td>{row.label}</td>
-                {row.grades.map((g, i) => (
-                  <td key={i} className={g.n < MIN_TRUSTED ? 'faint' : ''} title={g.n < MIN_TRUSTED ? `only ${g.n} graded: under ${MIN_TRUSTED}, too few to trust` : ''}>
-                    {g.n === 0 ? '—' : <GradeLine g={g} />}
+            {[...engine.calls].reverse().slice(0, 20).map((c) => (
+              <tr key={`${c.t}-${c.sym}`}>
+                <td>{new Date(c.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</td>
+                <td>{c.sym}</td>
+                <td className={c.dir > 0 ? 'up' : 'down'}>
+                  {c.dir > 0 ? '▲' : '▼'} {c.kind === 'break' ? 'BREAK' : 'PULLBACK'} {c.level} <span className="muted">@ {c.entry}</span>
+                </td>
+                {c.net.map((v, i) => (
+                  <td key={i}>
+                    <Bps v={v} />
                   </td>
                 ))}
               </tr>
             ))}
           </tbody>
         </table>
-      </section>
+        <div className="callsfoot">
+          <button className="ghost" onClick={() => void navigator.clipboard?.writeText(callsCsv(engine.calls)).then(() => setToast('Calls copied as CSV'), () => setToast('Copy failed'))}>
+            Copy as CSV
+          </button>
+          <button className="ghost" onClick={() => engine.clearCalls()}>
+            Clear
+          </button>
+        </div>
+      </details>
 
       <section className="hours">
         <div className="hourshead">

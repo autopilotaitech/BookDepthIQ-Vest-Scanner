@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { HtfTracker, findSetup, tradingDay, type Levels } from '../src/scan/setup.js';
-import { HORIZONS_MIN, callsCsv, gradeCall, openCall, scorecard } from '../src/scan/scorecard.js';
+import { HORIZONS_MIN, byMarket, callsCsv, gradeCall, openCall } from '../src/scan/scorecard.js';
 
 const lv = (o: Partial<Levels>): Levels => ({ pdh: undefined, pdl: undefined, hod: undefined, lod: undefined, vwap: undefined, ...o });
 
@@ -73,10 +73,12 @@ describe('scorecard', () => {
     gradeCall(late, 30 * 60_000, 99); // 15m read 15 min late → missed; 30m → +100
     expect(late.net[0]).toBeNull();
     expect(late.net[1]).toBeCloseTo(100);
-    const rows = scorecard([c, late]);
-    expect(rows.map((r) => r.label)).toEqual(['BREAK of a level', 'PULLBACK that held', 'all calls']);
-    expect(rows[0]!.grades[0]!.n).toBe(1);
-    expect(rows[2]!.grades[1]!.n).toBe(1);
-    expect(callsCsv([c]).split('\n')[1]).toContain('NQ-PERP,break,prior-day high,long,100,3.00,7.00,,');
+    gradeCall(c, 30 * 60_000, 100.2); // +20 − 3
+    const bm = byMarket([c, late]);
+    expect(bm).toEqual([
+      { sym: 'NQ-PERP', n: 1, avgBps: expect.closeTo(17, 6) },
+      { sym: 'BTC-PERP', n: 1, avgBps: expect.closeTo(100, 6) },
+    ]);
+    expect(callsCsv([c]).split('\n')[1]).toContain('NQ-PERP,break,prior-day high,long,100,3.00,7.00,17.00,');
   });
 });
