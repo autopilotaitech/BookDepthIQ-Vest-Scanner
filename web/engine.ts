@@ -13,7 +13,7 @@ import { BASELINE_MIN_MINUTES, addHistory, addMinute, avgPerMin, hourIn, type Ho
 import { liquidityScore } from '../src/scan/score';
 import { TIMEFRAMES, regime, type Regime } from '../src/scan/regime';
 import { gradeCall, openCall, type Call } from '../src/scan/scorecard';
-import { HtfTracker, type Setup } from '../src/scan/setup';
+import { HtfTracker, tradingDay, type Setup } from '../src/scan/setup';
 import { tickSizeOf } from '../src/vest/symbols';
 
 export interface Market {
@@ -34,9 +34,14 @@ const CALLS_KEY = 'scanner.calls.v2'; // v2: trend + level setups (v1 held the o
 const CALLS_KEEP_MS = 14 * 24 * 3600_000;
 /** Markets given a higher-timeframe tracker: the most traded by 24 h volume. */
 const HTF_MARKETS = 10;
-/** History loaded per tracker: enough for yesterday's full trading day and the 15-min trend. */
-const HTF_HISTORY_MS = 48 * 3600_000;
-const HTF_MAX_PAGES = 120;
+/**
+ * History per tracker: page back until it holds the previous trading day AND enough 15-min candles
+ * of real trading (after a weekend or holiday that means going back to the last session, e.g.
+ * Friday for NQ at Sunday's Globex open). Capped in time and pages.
+ */
+const HTF_MIN_BUCKETS = 40; // 15-min candles with trades (10 hours)
+const HTF_MAX_BACK_MS = 6 * 24 * 3600_000;
+const HTF_MAX_PAGES = 300;
 
 /** A setup that fired, for alerts and the table. */
 export interface SetupEvent {
@@ -223,24 +228,34 @@ export class Engine {
         if (this.htf.has(sym)) continue;
         this.htfBuffer.set(sym, []);
         const to = Date.now();
-        const from = to - HTF_HISTORY_MS;
+        const limit = to - HTF_MAX_BACK_MS;
+        const today = tradingDay(to);
         const rows: LiveTrade[] = [];
+        const buckets = new Set<number>();
+        const days = new Set<string>();
         let end = to;
         try {
-          for (let page = 0; page < HTF_MAX_PAGES && end > from; page++) {
+          for (let page = 0; page < HTF_MAX_PAGES && end > limit; page++) {
             const got = await fetchTradesBefore(sym, end, 1000);
             if (!got.length) break;
-            for (const r of got) rows.push({ id: r.id, t: r.time, price: Number(r.price), qty: Number(r.qty), side: r.side });
+            for (const r of got) {
+              rows.push({ id: r.id, t: r.time, price: Number(r.price), qty: Number(r.qty), side: r.side });
+              buckets.add(Math.floor(r.time / 900_000));
+            }
             const oldest = got[got.length - 1]!.time;
+            days.add(tradingDay(oldest));
             if (oldest >= end) break;
             end = oldest;
+            // Stop once a full earlier trading day is in hand: we are into the day before it.
+            const earlier = [...days].filter((d) => d < today).sort();
+            if (buckets.size >= HTF_MIN_BUCKETS && earlier.length >= 2) break;
           }
         } catch {
           this.htfBuffer.delete(sym);
           continue; // try again on the next round
         }
         const seen = new Set(rows.map((r) => r.id));
-        const all = [...rows.filter((r) => r.t >= from), ...(this.htfBuffer.get(sym) ?? []).filter((r) => !seen.has(r.id))].sort((a, b) => a.t - b.t);
+        const all = [...rows, ...(this.htfBuffer.get(sym) ?? []).filter((r) => !seen.has(r.id))].sort((a, b) => a.t - b.t);
         const tr = new HtfTracker(tickSizeOf(m.info));
         for (const r of all) tr.addTrade(r.t, r.price, r.qty, r.side);
         this.htfBuffer.delete(sym);

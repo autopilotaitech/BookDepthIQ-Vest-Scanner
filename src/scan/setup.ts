@@ -17,9 +17,19 @@ export const HTF_TREND: TrendConfig = { enabled: true, intervalSec: 900, numCand
 export const HTF_MIN_CANDLES = 10;
 export const SETUP_COOLDOWN_MS = 30 * 60_000;
 
-/** Trading-day key: the day starts 17:00 America/Chicago (DST-aware). */
+const DAY_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' });
+let dayCacheHour = NaN;
+let dayCacheKey = '';
+
+/** Trading-day key: the day starts 17:00 America/Chicago (DST-aware). Cached per hour: it is called
+ * for every trade, including ~100k history trades when a tracker loads. */
 export function tradingDay(t: number): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t + 7 * 3600_000));
+  const h = Math.floor(t / 3600_000);
+  if (h !== dayCacheHour) {
+    dayCacheHour = h;
+    dayCacheKey = DAY_FMT.format(new Date(h * 3600_000 + 7 * 3600_000));
+  }
+  return dayCacheKey;
 }
 
 export interface Levels {
